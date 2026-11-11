@@ -1,0 +1,48 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Run locally with `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisories: vulnerabilities fail the build; unmaintained crates warn.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+# Permissive licenses only (UPS-BMC is a private project; revisit if published).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Workspace crates are `publish = false` and carry no license field.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal path dependencies between unpublished workspace crates are fine.
+allow-wildcard-paths = true
+# Read-only guarantee (ADR-0001): device access goes through hidapi and the
+# ReadOnlyHid wrapper only. Crates that can talk to USB devices directly would
+# bypass the clippy guard, so they need an ADR before being allowed.
+deny = [
+    { crate = "rusb", reason = "raw USB access bypasses the read-only guard (ADR-0001)" },
+    { crate = "nusb", reason = "raw USB access bypasses the read-only guard (ADR-0001)" },
+    { crate = "libusb1-sys", reason = "raw USB access bypasses the read-only guard (ADR-0001)" },
+    { crate = "async-hid", reason = "second HID stack bypasses the read-only guard (ADR-0001)" },
+    { crate = "hidapi-rusb", reason = "second HID stack bypasses the read-only guard (ADR-0001)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

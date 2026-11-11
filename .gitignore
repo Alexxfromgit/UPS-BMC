@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local probe output (copy curated dumps to fixtures/ on purpose)
+/probe-output/
+
+# IDEs (RustRover/JetBrains, VS Code)
+.idea/
+.vscode/
+*.iml
+
+# Local data and config at the repo root (curated fixtures are kept)
+/*.sqlite
+/*.sqlite-*
+/*.db
