@@ -14,6 +14,11 @@
 //! | GET | `/api/v1/health` | [`HealthReport`] |
 //! | POST | `/api/v1/settings/battery` with [`BatteryRequest`] | [`SettingResponse`] |
 //! | POST | `/api/v1/battery/test` with [`RuntimeTestRequest`] | [`SettingResponse`] |
+//! | POST | `/api/v1/shutdown` with `{}` | [`SettingResponse`]; the collector stops |
+//!
+//! Every request must use a loopback `Host` (`127.0.0.1:<port>`,
+//! `localhost:<port>`, `[::1]:<port>`) and carry no `Origin` header: the API
+//! is for local native clients only.
 //!
 //! The collector binds to `127.0.0.1:47800` by default (see ADR-0002).
 
@@ -108,10 +113,14 @@ pub struct AssumedLoadRequest {
 
 /// Body of `POST /api/v1/settings/battery`: when the current battery was
 /// installed (`YYYY-MM-DD`), or null if unknown. Health estimation only uses
-/// outages since this date.
+/// outages since then. With `replaced_now: true` the collector records today
+/// and the exact current time instead (so earlier outages that day, on the
+/// old battery, don't count).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatteryRequest {
     pub installed: Option<NaiveDate>,
+    #[serde(default)]
+    pub replaced_now: bool,
 }
 
 /// Body of `POST /api/v1/battery/test`.

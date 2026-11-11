@@ -34,6 +34,8 @@ pub enum PollerMsg {
     /// From the API: set or clear the battery installation date.
     SetBatteryInstalled {
         date: Option<chrono::NaiveDate>,
+        /// The exact time, for "replaced now".
+        at: Option<chrono::DateTime<chrono::Utc>>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// From the API: start or cancel a guided runtime test.
@@ -92,6 +94,11 @@ impl Poller {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match self.control.recv_timeout(remaining) {
+                // The caller gave up waiting (timeout): don't change the UPS
+                // behind its back later (review M1-6).
+                Ok(Control::Apply { setting, reply }) if reply.is_closed() => {
+                    warn!(?setting, "setting request dropped: the caller timed out");
+                }
                 Ok(Control::Apply { setting, reply }) => {
                     let result = self.source.apply(setting).map_err(|e| e.to_string());
                     match &result {

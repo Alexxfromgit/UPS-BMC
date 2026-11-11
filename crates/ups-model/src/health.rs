@@ -41,6 +41,7 @@ pub enum HealthVerdict {
 
 /// One discharge (outage or runtime test) usable for health estimation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // independent flags of a wire record
 pub struct Discharge {
     pub outage_id: i64,
     pub start: DateTime<Utc>,
@@ -71,6 +72,10 @@ pub struct Discharge {
     /// Part of the baseline (the first discharges since the battery was installed).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub baseline: bool,
+    /// Used in the health comparison (false: no load value while discharges
+    /// are compared by capacity).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compared: bool,
 }
 
 /// Battery health estimate. Built from discharges since the battery was

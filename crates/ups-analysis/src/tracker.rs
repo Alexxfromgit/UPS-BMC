@@ -22,8 +22,22 @@ impl Default for TrackerConfig {
         Self {
             gap: Duration::seconds(30),
             merge_window: Duration::seconds(5),
-            recharged_pct: 99.0,
+            recharged_pct: ups_model::RECHARGED_PCT,
             max_step: Duration::seconds(10),
+        }
+    }
+}
+
+impl TrackerConfig {
+    /// Defaults adapted to the polling interval: a slow poll must not make
+    /// every interval a "gap" or cut energy steps short (review M2-7).
+    #[must_use]
+    pub fn for_poll_interval(poll: Duration) -> Self {
+        let d = Self::default();
+        Self {
+            gap: d.gap.max(poll * 5),
+            max_step: d.max_step.max(poll * 2),
+            ..d
         }
     }
 }
@@ -39,13 +53,23 @@ struct Sums {
 }
 
 impl Sums {
-    /// Continue from a stored outage (its averages count as one sample).
+    /// Continue from a stored outage, weighting its averages by the number of
+    /// samples behind them (older rows without a count weigh as one sample).
     fn from_outage(o: &Outage) -> Self {
+        let n = o.samples.max(1);
+        let weight = |avg: Option<f32>| {
+            (
+                avg.map_or(0.0, |v| f64::from(v) * f64::from(n)),
+                if avg.is_some() { n } else { 0 },
+            )
+        };
+        let (load, load_n) = weight(o.avg_load_pct);
+        let (power, power_n) = weight(o.avg_power_w);
         Self {
-            load: o.avg_load_pct.map_or(0.0, f64::from),
-            load_n: u32::from(o.avg_load_pct.is_some()),
-            power: o.avg_power_w.map_or(0.0, f64::from),
-            power_n: u32::from(o.avg_power_w.is_some()),
+            load,
+            load_n,
+            power,
+            power_n,
             energy_wh: o.energy_wh.map_or(0.0, f64::from),
         }
     }
@@ -130,6 +154,22 @@ impl OutageTracker {
         self.open.as_ref().map(|(o, _)| o)
     }
 
+    /// Removes the runtime-test tag from the ongoing outage and from the one
+    /// still recharging (a test was cancelled or interrupted). Returns the
+    /// outages that changed, to be stored.
+    pub fn clear_test_tag(&mut self) -> Vec<Outage> {
+        let mut changed = Vec::new();
+        if let Some((o, _)) = self.open.as_mut().filter(|(o, _)| o.runtime_test) {
+            o.runtime_test = false;
+            changed.push(o.clone());
+        }
+        if let Some(o) = self.recharging.as_mut().filter(|o| o.runtime_test) {
+            o.runtime_test = false;
+            changed.push(o.clone());
+        }
+        changed
+    }
+
     /// Feeds one snapshot. Returns every outage that was created or changed;
     /// the caller stores them (insert when `id == 0`, then [`Self::assign_id`]).
     pub fn feed(&mut self, s: &Snapshot) -> Vec<Outage> {
@@ -139,10 +179,13 @@ impl OutageTracker {
         let ts = s.ts;
         let on_battery = status.on_battery();
         let last = self.last;
-        if last.is_some_and(|(t, _)| ts <= t) {
-            return Vec::new(); // out of order or duplicate
+        // Slightly out of order or duplicate: ignore. A large backward jump
+        // (the clock was set back) is treated as a gap, so tracking goes on
+        // instead of ignoring everything until the old time is reached (M2-9).
+        if last.is_some_and(|(t, _)| ts <= t && t - ts <= self.cfg.gap) {
+            return Vec::new();
         }
-        let gap = last.is_some_and(|(t, _)| ts - t > self.cfg.gap);
+        let gap = last.is_some_and(|(t, _)| ts < t || ts - t > self.cfg.gap);
         let step = last
             .map(|(t, _)| ts - t)
             .filter(|_| !gap)
@@ -153,9 +196,15 @@ impl OutageTracker {
         if on_battery {
             // The interval before the first sample on battery was on utility,
             // so it contributes no battery energy.
-            let step = if self.open.is_some() {
+            let step = if let Some((o, _)) = self.open.as_mut() {
+                // Battery → gap → battery: mains may have returned in between.
+                o.gap_inside |= gap;
                 step
             } else {
+                if let Some(r) = self.recharging.as_mut().filter(|_| gap) {
+                    r.recharge_unobserved = true;
+                    changed.push(r.clone());
+                }
                 self.begin(s, last.filter(|_| gap).map(|(t, _)| t), gap);
                 Duration::zero()
             };
@@ -165,31 +214,56 @@ impl OutageTracker {
                 changed.push(o.clone());
             }
         } else {
+            // A gap while recharging: when the battery became full is unknown.
+            if gap && let Some(mut r) = self.recharging.take() {
+                r.recharge_unobserved = true;
+                changed.push(r);
+            }
             if let Some((mut o, sums)) = self.open.take() {
+                sums.write_to(&mut o);
                 if gap {
-                    // Not observed: the outage ended somewhere in the gap.
+                    // Not observed: the outage ended somewhere in the gap,
+                    // so the recharge time can't be measured either.
                     o.end = last.map(|(t, _)| t);
                     o.end_latest = Some(ts);
+                    o.recharge_unobserved = true;
+                    changed.push(o);
                 } else {
                     o.end = Some(ts);
+                    changed.push(o.clone());
+                    self.recharging = Some(o);
                 }
-                sums.write_to(&mut o);
-                changed.push(o.clone());
-                self.recharging = Some(o);
             }
-            if let Some(r) = self.recharging.as_mut()
-                && s.battery_charge_pct
-                    .is_some_and(|c| c >= self.cfg.recharged_pct)
-            {
-                r.recharged_at = Some(ts);
-                // The same outage may already be in `changed` (closed on
-                // this very sample); replace it with the newest version.
-                changed.retain(|c| c.id != r.id || c.start != r.start);
-                changed.push(r.clone());
-                self.recharging = None;
-            }
+            self.check_recharged(s, &mut changed);
         }
         changed
+    }
+
+    /// Marks the recharging outage as recharged once the charge is full again.
+    /// Not within the merge window after its end: mains may still fail again,
+    /// and the outage must stay available for merging (review M2-1).
+    fn check_recharged(&mut self, s: &Snapshot, changed: &mut Vec<Outage>) {
+        let full = s
+            .battery_charge_pct
+            .is_some_and(|c| c >= self.cfg.recharged_pct);
+        let Some(r) = self.recharging.as_mut() else {
+            return;
+        };
+        let settled = r.end.is_none_or(|e| s.ts - e > self.cfg.merge_window);
+        if !(full && settled) {
+            return;
+        }
+        // Never below the threshold: nothing to recharge.
+        r.recharged_at = if r.recharge_needed() {
+            Some(s.ts)
+        } else {
+            r.end
+        };
+        // The same outage may already be in `changed` (closed on this very
+        // sample); replace it with the newest version.
+        changed.retain(|c| c.id != r.id || c.start != r.start);
+        changed.push(r.clone());
+        self.recharging = None;
     }
 
     /// Opens an outage, or reopens the one that ended moments ago (flapping).
@@ -228,6 +302,7 @@ fn accumulate(o: &mut Outage, sums: &mut Sums, s: &Snapshot, step: Duration, ass
     if o.runtime_estimate_start_s.is_none() {
         o.runtime_estimate_start_s = s.battery_runtime_s;
     }
+    o.samples = o.samples.saturating_add(1);
     if let Some(l) = s.load_pct {
         sums.load += f64::from(l);
         sums.load_n += 1;
@@ -398,6 +473,112 @@ mod tests {
         assert_eq!(changed[0].charge_end_pct, Some(89.0));
         let changed = second.feed(&snap(15, false, 89.0));
         assert_eq!(changed[0].end, Some(t(15)));
+    }
+
+    #[test]
+    fn merges_flapping_power_at_full_charge() {
+        // Review M2-1: the 5E reads 100 % through short outages, so the
+        // closing sample is already "full". The flap must still merge.
+        let mut tr = OutageTracker::new(TrackerConfig::default());
+        let mut snaps = seconds(0, 5, false, |_| 100.0);
+        snaps.extend(seconds(5, 15, true, |_| 100.0));
+        snaps.extend(seconds(15, 17, false, |_| 100.0)); // back for 2 s
+        snaps.extend(seconds(17, 30, true, |_| 100.0));
+        snaps.extend(seconds(30, 60, false, |_| 100.0));
+        let outages = run(&mut tr, &snaps);
+        assert_eq!(outages.len(), 1, "{outages:#?}");
+        let o = &outages[0];
+        assert_eq!(o.end, Some(t(30)));
+        // Nothing to recharge: recharged at the end, and not counted as a recharge.
+        assert!(!o.recharge_needed());
+        assert_eq!(o.recharged_at, Some(t(30)));
+    }
+
+    #[test]
+    fn weights_resumed_averages_by_sample_count() {
+        // Review M2-2: 600 s at 200 W, a 3 s flap, then 10 s at 50 W.
+        let mut tr = OutageTracker::new(TrackerConfig::default());
+        let mut snaps: Vec<Snapshot> = (0..600)
+            .map(|i| {
+                let mut s = snap(i, true, 90.0);
+                s.realpower_w = Some(200.0);
+                s
+            })
+            .collect();
+        snaps.extend(seconds(600, 603, false, |_| 90.0));
+        snaps.extend((603..613).map(|i| {
+            let mut s = snap(i, true, 89.0);
+            s.realpower_w = Some(50.0);
+            s
+        }));
+        let outages = run(&mut tr, &snaps);
+        assert_eq!(outages.len(), 1);
+        let w = outages[0].avg_power_w.unwrap();
+        assert!((w - 197.5).abs() < 0.5, "{w}");
+        assert_eq!(outages[0].samples, 610);
+    }
+
+    #[test]
+    fn recharge_after_a_gap_is_not_observed() {
+        // Review M2-4a: outage, PC off overnight, back at 100 %.
+        let mut tr = OutageTracker::new(TrackerConfig::default());
+        let mut snaps = seconds(0, 10, true, |i| 100.0 - i as f32);
+        snaps.extend(seconds(10, 20, false, |_| 91.0));
+        snaps.push(snap(8 * 3600, false, 100.0));
+        let o = &run(&mut tr, &snaps)[0];
+        assert!(o.end_observed());
+        assert_eq!(o.recharged_at, None);
+        assert!(o.recharge_unobserved);
+    }
+
+    #[test]
+    fn flags_a_gap_inside_an_outage() {
+        // Review M2-4b: battery → collector gone for 1 h → battery.
+        let mut tr = OutageTracker::new(TrackerConfig::default());
+        let mut snaps = seconds(0, 10, true, |_| 90.0);
+        snaps.extend(seconds(3600, 3610, true, |_| 60.0));
+        snaps.push(snap(3610, false, 60.0));
+        let o = &run(&mut tr, &snaps)[0];
+        assert!(o.gap_inside);
+        assert!(o.start_observed() && o.end_observed());
+    }
+
+    #[test]
+    fn keeps_tracking_after_the_clock_is_set_back() {
+        // Review M2-9: a 1 h backward jump is a gap, not a reason to ignore samples.
+        let mut tr = OutageTracker::new(TrackerConfig::default());
+        tr.feed(&snap(3600, false, 100.0));
+        assert_eq!(
+            tr.feed(&snap(3599, true, 100.0)),
+            Vec::<Outage>::new(),
+            "small jitter ignored"
+        );
+        let changed = tr.feed(&snap(10, true, 100.0));
+        assert_eq!(changed.len(), 1);
+        assert!(!changed[0].start_observed());
+    }
+
+    #[test]
+    fn clears_the_test_tag() {
+        let mut tr = OutageTracker::new(TrackerConfig::default());
+        tr.set_testing(true);
+        tr.feed(&snap(0, true, 100.0));
+        tr.set_testing(false);
+        let cleared = tr.clear_test_tag();
+        assert_eq!(cleared.len(), 1);
+        assert!(!cleared[0].runtime_test);
+        assert!(!tr.feed(&snap(1, true, 99.0))[0].runtime_test);
+    }
+
+    #[test]
+    fn adapts_to_slow_polling() {
+        let cfg = TrackerConfig::for_poll_interval(Duration::seconds(15));
+        assert_eq!(cfg.gap, Duration::seconds(75));
+        assert_eq!(cfg.max_step, Duration::seconds(30));
+        assert_eq!(
+            TrackerConfig::for_poll_interval(Duration::seconds(1)),
+            TrackerConfig::default()
+        );
     }
 
     #[test]

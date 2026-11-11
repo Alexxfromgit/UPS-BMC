@@ -29,17 +29,21 @@ before M4.
    variable names (`battery.charge`, `ups.status`, ...) on the wire.
 4. **Strictly read-only:** no `SET_FEATURE` and no output reports, which rules
    out beeper changes, self-tests and shutdown commands. Changing this needs a
-   new ADR.
+   new ADR. *Amended by [ADR-0003](0003-ups-configuration-writes.md):* the
+   beeper on/off setting is the one allowed write, through a single reviewed
+   code path.
 
 ## How the read-only rule is enforced
 The guarantee lives in the code. The OS doesn't provide it: on Windows, hidapi
 opens the device handle for read *and* write.
 
 - **Single entry point:** a HID device can only be opened through `ReadOnlyHid`
-  (currently `apps/hid-probe/src/readonly.rs`; it moves to `ups-source` in M1).
-  That wrapper exposes read methods only.
-- **Clippy:** `clippy.toml` denies `hidapi::HidApi::open*` everywhere else, as
-  well as every hidapi write method. CI runs clippy with `-D warnings`.
+  (`crates/ups-source/src/hid/readonly.rs`). Its public methods only read; the
+  one write method is `pub(super)` and used only by the beeper code (ADR-0003).
+- **Clippy:** `clippy.toml` denies every hidapi call that opens a device or
+  returns a raw handle (`HidApi::open*`, `HidApi::wrap_sys_device`,
+  `DeviceInfo::open_device`) and every hidapi write method, except the
+  reviewed `allow`s inside `ReadOnlyHid`. CI runs clippy with `-D warnings`.
 - **cargo-deny:** `deny.toml` bans other USB/HID crates (`rusb`, `nusb`, ...)
   that could bypass the guard.
 - **No FFI:** `unsafe_code = "deny"` rules out raw FFI calls. It is `deny`

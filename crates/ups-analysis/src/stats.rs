@@ -40,10 +40,13 @@ pub fn month_range(year: i32, month: u32) -> Option<(NaiveDate, NaiveDate)> {
     Some((first, next.pred_opt()?))
 }
 
-/// UTC instant of local midnight at the start of `day`.
-fn local_midnight<Tz: TimeZone>(tz: &Tz, day: NaiveDate) -> DateTime<Utc> {
-    day.and_hms_opt(0, 0, 0)
-        .and_then(|m| tz.from_local_datetime(&m).earliest())
+/// UTC instant at which local `day` begins. Where a DST switch skips
+/// midnight itself (e.g. Chile, Cuba), the day begins at the first local time
+/// that exists (review M2-6).
+pub(crate) fn local_midnight<Tz: TimeZone>(tz: &Tz, day: NaiveDate) -> DateTime<Utc> {
+    (0..=3)
+        .filter_map(|h| day.and_hms_opt(h, 0, 0))
+        .find_map(|t| tz.from_local_datetime(&t).earliest())
         .map_or_else(
             || day.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc(),
             |m| m.with_timezone(&Utc),
@@ -81,8 +84,11 @@ pub fn period_stats<Tz: TimeZone>(
     let period_s = ((period_end - period_start).num_milliseconds() as f64 / 1000.0).max(0.0);
 
     let secs = |d: Duration| d.num_milliseconds() as f64 / 1000.0;
+    // Outages that never drained the battery below "full" need no recharge
+    // and would pull the average towards zero.
     let recharges: Vec<f64> = started_in
         .iter()
+        .filter(|o| o.recharge_needed())
         .filter_map(|o| o.recharge_duration().map(secs))
         .collect();
 

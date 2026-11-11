@@ -175,6 +175,7 @@ fn main() -> Result<()> {
         status: status.clone(),
         live: live.clone(),
         retention: chrono::Duration::days(i64::from(args.retention_days)),
+        poll: interval,
     }
     .spawn(poll_rx)?;
     let poller = poller::spawn(source, interval, poll_tx, control_rx)?;
@@ -187,17 +188,23 @@ fn main() -> Result<()> {
         "UPS-BMC collector started"
     );
 
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
     let app = api::router(api::AppState {
         status,
         live,
         db_path,
         control: control_tx.clone(),
         ingest: ingest_tx,
+        port: args.bind.port(),
+        shutdown: shutdown_tx,
     });
     let served = runtime.block_on(async {
         axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
+            .with_graceful_shutdown(async move {
+                tokio::select! {
+                    () = stop_signal() => {}
+                    _ = shutdown_rx.recv() => {}
+                }
                 info!("shutting down");
             })
             .await
@@ -206,12 +213,65 @@ fn main() -> Result<()> {
         warn!(error = %e, "API server stopped with an error");
     }
 
+    stop(&control_tx, poller, runtime, ingest);
+    Ok(())
+}
+
+/// Stops the threads in order: poller, API tasks, then ingest.
+fn stop(
+    control_tx: &mpsc::Sender<poller::Control>,
+    poller: std::thread::JoinHandle<()>,
+    runtime: tokio::runtime::Runtime,
+    ingest: std::thread::JoinHandle<()>,
+) {
     // Stop the poller; the ingest thread then drains, records "stopped" and exits.
     let _ = control_tx.send(poller::Control::Stop);
-    let _ = poller.join();
+    // A UPS that stopped answering can block the poller in a USB read; don't
+    // hang forever on it (review M1-6). Exiting the process ends the thread.
+    join_within(poller, Duration::from_secs(5), "poller");
     // Stop API tasks first: open WebSocket sessions hold senders to the
     // ingest thread, which only finishes once every sender is gone.
     runtime.shutdown_timeout(Duration::from_secs(2));
-    let _ = ingest.join();
-    Ok(())
+    join_within(ingest, Duration::from_secs(10), "ingest");
+}
+
+/// Waits for a thread to finish, at most `limit`.
+fn join_within(handle: std::thread::JoinHandle<()>, limit: Duration, name: &str) {
+    let start = std::time::Instant::now();
+    while !handle.is_finished() {
+        if start.elapsed() > limit {
+            warn!(thread = name, "thread did not stop in time; exiting anyway");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = handle.join();
+}
+
+/// Ctrl+C, and on Windows also closing the console, sign-out and shutdown
+/// (review M1-5). A collector started without a console (by the UI) is
+/// stopped through `POST /api/v1/shutdown` instead.
+async fn stop_signal() {
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        let (Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) = (
+            windows::ctrl_close(),
+            windows::ctrl_logoff(),
+            windows::ctrl_shutdown(),
+        ) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = close.recv() => {}
+            _ = logoff.recv() => {}
+            _ = shutdown.recv() => {}
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

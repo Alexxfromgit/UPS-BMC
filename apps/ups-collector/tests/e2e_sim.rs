@@ -13,13 +13,16 @@ struct Collector {
     child: Child,
     base: String,
     dir: std::path::PathBuf,
+    keep_dir: bool,
 }
 
 impl Drop for Collector {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if !self.keep_dir {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -38,6 +41,10 @@ fn start() -> Collector {
 fn start_with(extra: &[&str]) -> Collector {
     let port = free_port();
     let dir = std::env::temp_dir().join(format!("ups-collector-e2e-{}-{port}", std::process::id()));
+    start_in(dir, port, extra)
+}
+
+fn start_in(dir: std::path::PathBuf, port: u16, extra: &[&str]) -> Collector {
     std::fs::create_dir_all(&dir).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_ups-collector"))
         .args(["--source", "sim", "--poll-ms", "250", "--bind"])
@@ -55,6 +62,7 @@ fn start_with(extra: &[&str]) -> Collector {
         child,
         base: format!("127.0.0.1:{port}"),
         dir,
+        keep_dir: false,
     }
 }
 
@@ -340,5 +348,73 @@ fn runs_a_guided_runtime_test_and_reports_health() {
     assert_eq!(
         health.battery_installed,
         chrono::NaiveDate::from_ymd_opt(2024, 3, 15)
+    );
+}
+
+#[test]
+fn refuses_foreign_host_names() {
+    // DNS rebinding: a web page reaching 127.0.0.1 under its own host name.
+    let c = start();
+    wait_for(Duration::from_secs(20), || {
+        get::<StatusResponse>(&c, "/api/v1/status").filter(|s| s.snapshot.is_some())
+    });
+    let resp = ureq::get(format!("http://{}/api/v1/status", c.base))
+        .header("Host", "evil.example:47800")
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 403);
+    let port = c.base.rsplit(':').next().unwrap();
+    let resp = ureq::get(format!("http://{}/api/v1/status", c.base))
+        .header("Host", format!("localhost:{port}"))
+        .call()
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[test]
+fn survives_a_restart_mid_outage() {
+    // 10× simulator: outage from ~6 s to ~15 s after start.
+    let port = free_port();
+    let dir = std::env::temp_dir().join(format!("ups-collector-e2e-{}-{port}", std::process::id()));
+    let mut first = start_in(dir.clone(), port, &["--sim-speed", "10"]);
+    first.keep_dir = true;
+    wait_for(Duration::from_secs(30), || {
+        get::<ups_api::OutagesResponse>(&first, "/api/v1/outages?days=1")?
+            .outages
+            .into_iter()
+            .find(|o| o.is_ongoing() && o.samples >= 4)
+    });
+    // Graceful stop through the API (what the installer uses).
+    let (code, _) = post(&first, "/api/v1/shutdown", "{}", None);
+    assert_eq!(code, 200);
+    wait_for(Duration::from_secs(15), || {
+        first.child.try_wait().ok().flatten()
+    });
+    drop(first);
+
+    let second = start_in(dir, port, &["--sim-speed", "10"]);
+    let outages = wait_for(Duration::from_secs(40), || {
+        get::<ups_api::OutagesResponse>(&second, "/api/v1/outages?days=1")
+            .map(|r| r.outages)
+            .filter(|o| o.iter().any(|o| o.end.is_some()))
+    });
+    // The restarted simulator begins its cycle on mains, so the outage ends
+    // at the restart. The short downtime is not a monitoring gap: the outage
+    // was resumed and closed with both ends observed, and its sample count
+    // (which weights resumed averages; unit-tested in the tracker) survived.
+    let o = outages.iter().find(|o| o.end.is_some()).unwrap();
+    assert_eq!(outages.len(), 1, "{outages:?}");
+    assert!(o.start_observed() && o.end_observed(), "{o:?}");
+    assert!(o.samples >= 4, "{o:?}");
+    let events: EventsResponse = get(&second, "/api/v1/events?limit=50").unwrap();
+    assert!(
+        events
+            .events
+            .iter()
+            .any(|e| e.kind == EventKind::CollectorStopped),
+        "graceful stop recorded"
     );
 }

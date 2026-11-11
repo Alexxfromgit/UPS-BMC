@@ -362,9 +362,10 @@ fn status(flags: &HashMap<Target, bool>) -> Option<UpsStatus> {
     let on = |t| flags.get(&t).copied();
     let mut s = UpsStatus::empty();
     match (on(Target::AcPresent), on(Target::Discharging)) {
-        (Some(true), _) => s |= UpsStatus::OL,
+        // Without an ACPresent usage, not discharging means mains power.
+        (Some(true), _) | (None, Some(false)) => s |= UpsStatus::OL,
         (Some(false), _) | (None, Some(true)) => s |= UpsStatus::OB,
-        (None, _) => {}
+        (None, None) => {}
     }
     let mut set = |t, flag| {
         if on(t) == Some(true) {
@@ -417,6 +418,11 @@ mod tests {
         assert_eq!(
             status(&flags(&[(Discharging, true)])),
             Some(UpsStatus::OB | UpsStatus::DISCHRG)
+        );
+        // ... and not discharging implies mains power (review M1-8).
+        assert_eq!(
+            status(&flags(&[(Discharging, false), (Charging, true)])),
+            Some(UpsStatus::OL | UpsStatus::CHRG)
         );
         assert_eq!(
             status(&flags(&[

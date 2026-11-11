@@ -10,9 +10,14 @@ moves monitoring to a Raspberry Pi.
 
 ## Decision
 - **`ups-collector`:** a headless daemon that polls the source, writes to
-  SQLite, runs the outage state machine and sends notifications. It exposes an
-  HTTP + WebSocket API. It runs as a Windows service or autostart task on
-  Windows, and as a systemd unit on the Pi.
+  SQLite, runs the outage state machine and records events. It exposes an
+  HTTP + WebSocket API and pushes events live. On Windows it is started by
+  the UI (which autostarts at sign-in if enabled) and keeps running after the
+  UI exits; it does not run without a signed-in user. On the Pi it will run as
+  a systemd unit (M4).
+- **Notifications** are shown by the UI from the live event stream (Windows
+  toasts). Remote notification channels (ntfy, Telegram, email) are planned
+  in the collector for M4.
 - **`ups-bmc`:** the Slint desktop UI. It talks only to the collector API,
   never to the database directly.
 - **API binding:** localhost by default. Exposing it on the LAN requires a

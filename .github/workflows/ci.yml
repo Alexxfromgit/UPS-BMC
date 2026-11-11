@@ -55,6 +55,23 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  release:
+    # Release-only code (e.g. the windows_subsystem attribute) and the
+    # installer script are not exercised by the debug builds above.
+    name: release build + installer (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install Inno Setup 6
+        run: choco install innosetup --no-progress -y
+      - name: Build release binaries and installer
+        shell: pwsh
+        run: ./installer/build.ps1
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest

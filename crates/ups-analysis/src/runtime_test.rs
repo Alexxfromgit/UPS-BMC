@@ -12,6 +12,9 @@ use ups_model::{RuntimeTestPhase, RuntimeTestStatus, Snapshot, UpsStatus};
 const ARM_TIMEOUT: Duration = Duration::minutes(30);
 /// Repeat the "restore power" reminder this often.
 const REMIND_EVERY: Duration = Duration::minutes(2);
+/// Mains returning sooner than this is a blip, not the end of the test: the
+/// test goes back to Armed (review M3-6).
+const MIN_DISCHARGE: Duration = Duration::seconds(60);
 /// The battery must be at least this full to start a test.
 pub const MIN_START_PCT: f32 = 95.0;
 /// Allowed stop levels.
@@ -29,6 +32,9 @@ pub enum TestNotice {
     },
     /// Mains power is back: the test is complete.
     Finished,
+    /// Mains came back within a minute (a blip): the test is armed again and
+    /// the short outage is not a test.
+    Interrupted,
     /// Nobody unplugged the UPS in time.
     Expired,
 }
@@ -107,6 +113,13 @@ impl RuntimeTest {
         self.status.take().is_some()
     }
 
+    /// Continues a test saved before a collector restart (review M3-3). A
+    /// test past its stop level reminds the user right away.
+    pub fn restore(&mut self, status: RuntimeTestStatus) {
+        self.status = Some(status);
+        self.last_reminder = None;
+    }
+
     /// Follows the test on a new reading.
     pub fn on_snapshot(&mut self, s: &Snapshot) -> Vec<TestNotice> {
         let Some(st) = self.status.as_mut() else {
@@ -129,6 +142,15 @@ impl RuntimeTest {
                     self.status = None;
                     return vec![TestNotice::Expired];
                 }
+            }
+            RuntimeTestPhase::Running
+                if !on_battery && st.started_at.is_some_and(|t| s.ts - t < MIN_DISCHARGE) =>
+            {
+                st.phase = RuntimeTestPhase::Armed;
+                st.armed_at = s.ts;
+                st.started_at = None;
+                st.charge_start_pct = None;
+                return vec![TestNotice::Interrupted];
             }
             RuntimeTestPhase::Running | RuntimeTestPhase::RestorePower if !on_battery => {
                 self.status = None;
@@ -266,6 +288,43 @@ mod tests {
             [TestNotice::Finished]
         );
         assert!(rt.status().is_none());
+    }
+
+    #[test]
+    fn a_mains_blip_re_arms_the_test() {
+        let mut rt = RuntimeTest::default();
+        rt.arm(50.0, Some(&snap(0, false, 100.0)), t(0)).unwrap();
+        rt.on_snapshot(&snap(10, true, 100.0));
+        assert_eq!(
+            rt.on_snapshot(&snap(12, false, 100.0)),
+            [TestNotice::Interrupted]
+        );
+        let st = rt.status().unwrap();
+        assert_eq!(st.phase, RuntimeTestPhase::Armed);
+        assert_eq!(st.armed_at, t(12));
+        assert!(!rt.discharging());
+    }
+
+    #[test]
+    fn continues_after_a_restart() {
+        let mut rt = RuntimeTest::default();
+        rt.arm(50.0, Some(&snap(0, false, 100.0)), t(0)).unwrap();
+        rt.on_snapshot(&snap(10, true, 100.0));
+        rt.on_snapshot(&snap(500, true, 50.0));
+        let saved = rt.status().cloned().unwrap();
+
+        let mut after = RuntimeTest::default();
+        after.restore(saved);
+        assert!(after.discharging());
+        // Past the stop level: the reminder comes at once.
+        assert!(matches!(
+            after.on_snapshot(&snap(600, true, 45.0))[..],
+            [TestNotice::RestorePower { reminder: true, .. }]
+        ));
+        assert_eq!(
+            after.on_snapshot(&snap(700, false, 45.0)),
+            [TestNotice::Finished]
+        );
     }
 
     #[test]

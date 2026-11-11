@@ -20,6 +20,6 @@ pub use health::{
     Confidence, Discharge, HealthReport, HealthVerdict, RuntimeTestPhase, RuntimeTestStatus,
 };
 pub use history::HistoryPoint;
-pub use outage::{DailyCoverage, Outage, PeriodStats};
+pub use outage::{DailyCoverage, Outage, PeriodStats, RECHARGED_PCT};
 pub use snapshot::Snapshot;
 pub use status::UpsStatus;

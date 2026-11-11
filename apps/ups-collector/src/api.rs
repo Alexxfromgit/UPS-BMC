@@ -35,9 +35,19 @@ pub struct AppState {
     pub control: std::sync::mpsc::Sender<Control>,
     /// Requests to the ingest thread (load estimate).
     pub ingest: std::sync::mpsc::Sender<crate::poller::PollerMsg>,
+    /// The port the API listens on (for the `Host` check).
+    pub port: u16,
+    /// Asks `main` to shut the collector down gracefully.
+    pub shutdown: tokio::sync::mpsc::Sender<()>,
 }
 
+/// How often the live WebSocket repeats the status even when nothing changes
+/// (e.g. while the UPS is unplugged), so clients can tell a quiet collector
+/// from a dead one (review M1-1).
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub fn router(state: AppState) -> Router {
+    let guard = axum::middleware::from_fn_with_state(state.clone(), local_clients_only);
     Router::new()
         .route(
             "/",
@@ -55,7 +65,49 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/settings/battery", post(set_battery))
         .route("/api/v1/battery/test", post(runtime_test))
+        .route("/api/v1/shutdown", post(shutdown))
+        .layer(guard)
         .with_state(state)
+}
+
+/// Every request must come from a local native client (review M1-2):
+/// * the `Host` must be a loopback name with our port. A web page using DNS
+///   rebinding reaches 127.0.0.1 under its own host name and is refused, so
+///   it can't read the status, history or reports;
+/// * no `Origin` header (browsers send it on cross-site requests; see
+///   [`reject_browsers`]).
+async fn local_clients_only(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, ApiError> {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let allowed = ["127.0.0.1", "localhost", "[::1]"]
+        .iter()
+        .any(|name| host == format!("{name}:{}", state.port));
+    if !allowed {
+        return Err((StatusCode::FORBIDDEN, "unexpected Host header".into()));
+    }
+    reject_browsers(request.headers())?;
+    Ok(next.run(request).await)
+}
+
+/// `POST /api/v1/shutdown` with `{}`: stops the collector gracefully (used by
+/// the installer before an upgrade; review M1-5).
+async fn shutdown(
+    State(state): State<AppState>,
+    Json(_): Json<serde_json::Value>,
+) -> Json<SettingResponse> {
+    let _ = state.shutdown.try_send(());
+    Json(SettingResponse {
+        ok: true,
+        message: "Collector stopping".into(),
+    })
 }
 
 fn current(state: &AppState) -> StatusResponse {
@@ -118,12 +170,7 @@ async fn events(
     Ok(Json(EventsResponse { events }))
 }
 
-async fn live(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Result<Response, ApiError> {
-    reject_browsers(&headers)?;
+async fn live(State(state): State<AppState>, ws: WebSocketUpgrade) -> Result<Response, ApiError> {
     Ok(ws.on_upgrade(move |socket| live_session(socket, state)))
 }
 
@@ -140,8 +187,13 @@ async fn live_session(mut socket: WebSocket, state: AppState) {
     if !send(&mut socket, &LiveMessage::Status(Box::new(current(&state)))).await {
         return;
     }
+    let mut heartbeat = tokio::time::interval(HEARTBEAT);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                if !send(&mut socket, &LiveMessage::Status(Box::new(current(&state)))).await { break }
+            }
             msg = rx.recv() => match msg {
                 Ok(msg) => if !send(&mut socket, &msg).await { break },
                 // Slow client: skip ahead and resend the full status.
@@ -178,10 +230,8 @@ fn reject_browsers(headers: &HeaderMap) -> Result<(), ApiError> {
 /// reading it back, and recorded as an event.
 async fn set_beeper(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(req): Json<BeeperRequest>,
 ) -> Result<Json<SettingResponse>, ApiError> {
-    reject_browsers(&headers)?;
     let unavailable = |e: &str| (StatusCode::SERVICE_UNAVAILABLE, e.to_owned());
     let (reply, rx) = tokio::sync::oneshot::channel();
     state
@@ -318,10 +368,8 @@ async fn report(
 /// `POST /api/v1/settings/assumed-load` with `{"watts": 20}` or `{"watts": null}`.
 async fn set_assumed_load(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(req): Json<AssumedLoadRequest>,
 ) -> Result<Json<SettingResponse>, ApiError> {
-    reject_browsers(&headers)?;
     if let Some(w) = req.watts
         && !(1.0..=2000.0).contains(&w)
     {
@@ -349,23 +397,29 @@ async fn set_assumed_load(
 /// was installed (or all outages).
 async fn health(State(state): State<AppState>) -> Result<Json<HealthReport>, ApiError> {
     let now = Utc::now();
-    let replace_flag = current(&state)
-        .snapshot
-        .and_then(|s| s.status)
-        .is_some_and(|f| f.contains(UpsStatus::RB));
+    // Only a current reading counts: a stale one would keep (or miss) the
+    // "replace battery" verdict while the UPS is disconnected (review M3-9).
+    let st = current(&state);
+    let replace_flag = st.connection == ups_api::Connection::Connected
+        && st
+            .snapshot
+            .and_then(|s| s.status)
+            .is_some_and(|f| f.contains(UpsStatus::RB));
     let report = query(&state, move |s| {
         let installed = s.battery_installed()?;
-        let from = installed.and_then(|d| d.and_hms_opt(0, 0, 0)).map_or(
-            chrono::DateTime::<Utc>::UNIX_EPOCH,
-            |d| {
-                // A day early: the date is local, timestamps are UTC.
-                d.and_utc() - chrono::Duration::days(1)
-            },
-        );
+        // The exact replacement time if known, else local midnight of the
+        // date (review M3-7/M3-8).
+        let since = s.battery_installed_at()?.or_else(|| {
+            installed
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .and_then(|m| m.and_local_timezone(Local).earliest())
+                .map(|m| m.with_timezone(&Utc))
+        });
+        let from = since.unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH);
         let outages = s.outages_since(from, 100_000)?;
         Ok(ups_analysis::health::assess(
             &outages,
-            installed,
+            ups_analysis::health::Battery { installed, since },
             replace_flag,
             now,
             &ups_analysis::health::HealthConfig::default(),
@@ -394,29 +448,31 @@ async fn ask_ingest<T>(
 /// `POST /api/v1/settings/battery` with `{"installed": "2024-03-15"}` or `{"installed": null}`.
 async fn set_battery(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(req): Json<BatteryRequest>,
 ) -> Result<Json<SettingResponse>, ApiError> {
-    reject_browsers(&headers)?;
     if req.installed.is_some_and(|d| d > Local::now().date_naive()) {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
             "the installation date can't be in the future".into(),
         ));
     }
+    // "Replaced now": today's date and the exact time (review M3-8).
+    let (date, at) = if req.replaced_now {
+        (Some(Local::now().date_naive()), Some(Utc::now()))
+    } else {
+        (req.installed, None)
+    };
     ask_ingest(&state, |reply| {
-        crate::poller::PollerMsg::SetBatteryInstalled {
-            date: req.installed,
-            reply,
-        }
+        crate::poller::PollerMsg::SetBatteryInstalled { date, at, reply }
     })
     .await?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(SettingResponse {
         ok: true,
-        message: match req.installed {
-            Some(d) => format!("Battery installed on {}", d.format("%d.%m.%Y")),
-            None => "Battery installation date cleared".into(),
+        message: match (req.replaced_now, date) {
+            (true, _) => "New battery recorded: from now on, health is measured for it".into(),
+            (false, Some(d)) => format!("Battery installed on {}", d.format("%d.%m.%Y")),
+            (false, None) => "Battery installation date cleared".into(),
         },
     }))
 }
@@ -425,10 +481,8 @@ async fn set_battery(
 /// `{"action":"cancel"}`. Nothing is sent to the UPS: the user unplugs it.
 async fn runtime_test(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(request): Json<RuntimeTestRequest>,
 ) -> Result<Json<SettingResponse>, ApiError> {
-    reject_browsers(&headers)?;
     let message = ask_ingest(&state, |reply| crate::poller::PollerMsg::RuntimeTest {
         request,
         reply,

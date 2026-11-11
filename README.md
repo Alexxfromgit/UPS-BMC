@@ -91,7 +91,9 @@ cargo build --release -p ups-collector -p ups-bmc
     UPS. Your equipment runs on battery during the test.
 - **Reports tab:** pick a month to open an HTML report (summary, daily
   overview, outage table) or export a CSV. Both are saved to
-  `Documents\UPS-BMC Reports`.
+  `Documents\UPS-BMC Reports`. The CSV starts with a `sep=,` line so Excel
+  splits it into columns in every locale, and has UTC columns for
+  unambiguous times.
 - **Settings** (top right of the window):
   - **UPS beeper:** on/off. The change is verified by reading it back from the UPS.
   - **Start with Windows:** turns autostart at sign-in on or off.
@@ -113,6 +115,11 @@ cargo build --release -p ups-collector -p ups-bmc
 | `GET /api/v1/health` | battery health report (verdict, confidence, discharges used) |
 | `POST /api/v1/settings/battery` | `{"installed": "2024-03-15"}`: battery installation date |
 | `POST /api/v1/battery/test` | `{"action": "start", "stop_at_pct": 50}` or `{"action": "cancel"}` |
+| `POST /api/v1/shutdown` | `{}`: stop the collector gracefully (used by the installer) |
+
+The API only answers local native clients: requests need a loopback `Host`
+(`127.0.0.1`, `localhost` or `[::1]` with the port) and must not carry an
+`Origin` header, so web pages can't read or change anything through it.
 
 ## Workspace layout
 ```

@@ -29,10 +29,19 @@ an absolute capacity:
    `duration × 100 / charge used`. When the average power is known (measured,
    or the user's estimate), also compute the capacity
    `power × full runtime` in Wh.
-3. **Metric.** Compare by capacity when at least two discharges have a power
-   value and they make up at least half of all usable discharges. That evens
-   out different loads, to first order. Otherwise compare full runtimes,
-   which assumes a similar load. The confidence is lowered in that case.
+3. **Metric.** Compare by capacity, which evens out different loads to first
+   order, only when all of these hold:
+   - the discharges that form the baseline all have a power value, so the
+     baseline stays the battery's oldest discharges and doesn't move when a
+     load value appears later;
+   - at least one power value was *measured*. If every value is the user's
+     estimate, capacity = estimate × runtime adds nothing, and a refined
+     estimate would fake a change in health;
+   - at least two discharges, and at least half of them, have a power value.
+
+   Otherwise compare full runtimes, which assumes a similar load, and lower
+   the confidence. Discharges left out of a capacity comparison (no load) are
+   marked "not compared".
 4. **Baseline and recent.** The baseline is the median of the first
    `min(3, n/2)` discharges. The recent value is the median of the last
    `min(3, n − baseline)`. Health is recent ÷ baseline, capped at 100 %.
@@ -45,7 +54,9 @@ an absolute capacity:
    It drops one level when the baseline or the recent group has no "strong"
    discharge (≥ 20 % used, or a runtime test). It also drops one level when
    runtimes are compared without load, or when the loads differ by more than
-   2×.
+   2×. It drops one more level when the median depth of the two groups (charge
+   used) differs by more than 2×: shallow discharges overstate the
+   extrapolated runtime, so such a comparison is biased.
 6. **Verdict.**
    - Replace: the UPS sets RB, or health is below 60 %.
    - Aging: health is below 80 %.
@@ -53,11 +64,17 @@ an absolute capacity:
    - Unknown: fewer than two usable discharges.
 
    Supporting reasons are also given:
-   - recent outages lasting less than 70 % of the UPS's own runtime estimate;
+   - the extrapolated runtime at the recent load being less than 70 % of the
+     UPS's own runtime estimate;
    - battery age over 3 or 4 years, when the installation date is known.
+
+   The UPS's RB flag is only used while the UPS is connected (a stale reading
+   could keep or miss the verdict).
 7. **New battery.** The user enters the installation date, or clicks
-   "Replaced today". Only outages from that date on are used, so a new
-   battery gets a fresh baseline.
+   "Replaced today". Only outages from then on are used, so a new battery gets
+   a fresh baseline. A date counts from local midnight; "Replaced today"
+   records the exact time, so the old battery's outages earlier that day are
+   excluded.
 8. **Guided runtime test.**
    - The user arms the test (on mains, at least 95 % charge, stop level
      20–90 %, default 50 %) and unplugs the UPS.
@@ -65,6 +82,12 @@ an absolute capacity:
      "plug it back in" notification at the stop level, or earlier if the UPS
      reports low battery. The notification repeats every 2 minutes.
    - An armed test expires after 30 minutes.
+   - Mains returning within a minute is a blip: the test goes back to armed
+     and that short outage isn't tagged.
+   - A test cancelled while discharging removes the tag, so the outage counts
+     like any other.
+   - The test state is saved in the database, so a collector restart during a
+     test continues it (and reminds at once if the stop level has passed).
    - Nothing is sent to the UPS: the test is a normal, deliberate outage.
 
 ## Consequences
@@ -74,13 +97,19 @@ an absolute capacity:
   UPS-estimate check and the battery age partly cover that case.
 - Linear extrapolation overstates the runtime of shallow discharges, because
   lead-acid voltage, and with it the UPS's charge estimate, falls faster near
-  the end. Comparing like with like (the baseline is made the same way) keeps
-  the ratio meaningful. Runtime tests to 50 % are the most comparable data.
+  the end. The ratio is only meaningful when the baseline and recent
+  discharges have a similar depth; when they don't, the confidence is lowered
+  and the reasons say so. Runtime tests to the same stop level are the most
+  comparable data.
 - With an estimated load, capacity in Wh is only as good as the estimate.
   Ratios stay valid as long as the estimate (and the real load) don't change.
   The UI marks such figures with "≈".
 - Outage records gain a `runtime_test` flag (database migration v4). Reports
-  label test outages. They still count as time on battery in availability
+  label test outages.
+- Changed after the independent review of 2026-11-12 (findings M3-1 to
+  M3-12): the metric choice, the depth check, the stale RB flag, the local
+  installation date and exact replacement time, the blip and cancel handling
+  and the saved test state. They still count as time on battery in availability
   statistics, which describe what the protected equipment saw.
 - Future (M4+): use a UPS-initiated battery test where the device supports it
   (an ADR-0003 write, opt-in), and per-sample voltage curves for a

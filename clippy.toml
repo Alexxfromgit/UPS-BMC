@@ -15,4 +15,7 @@ disallowed-methods = [
     { path = "hidapi::HidApi::open", reason = "open devices via ReadOnlyHid only (ADR-0001)" },
     { path = "hidapi::HidApi::open_path", reason = "open devices via ReadOnlyHid only (ADR-0001)" },
     { path = "hidapi::HidApi::open_serial", reason = "open devices via ReadOnlyHid only (ADR-0001)" },
+    { path = "hidapi::DeviceInfo::open_device", reason = "open devices via ReadOnlyHid only (ADR-0001)" },
+    # Exists only on some hidapi backends (libusb/Linux); `allow-invalid` keeps the entry where it does not.
+    { path = "hidapi::HidApi::wrap_sys_device", reason = "open devices via ReadOnlyHid only (ADR-0001)", allow-invalid = true },
 ]

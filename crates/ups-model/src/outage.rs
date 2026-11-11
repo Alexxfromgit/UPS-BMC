@@ -1,6 +1,9 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Charge at which the battery counts as fully recharged.
+pub const RECHARGED_PCT: f32 = 99.0;
+
 /// One mains power outage: the UPS ran on battery from `start` to `end`.
 ///
 /// Monitoring can have gaps (collector stopped, PC shut down during a long
@@ -8,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// `start_earliest`..`start` or `end`..`end_latest`, and the `*_observed`
 /// flags are false.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // independent flags of a stored record
 pub struct Outage {
     /// Storage ID (0 before the outage is stored).
     pub id: i64,
@@ -53,6 +57,17 @@ pub struct Outage {
     /// the UPS on purpose to measure the battery).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub runtime_test: bool,
+    /// Samples on battery behind the averages (weights them when an outage
+    /// is resumed after a restart or reopened by flapping power).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub samples: u32,
+    /// Monitoring stopped for a while *during* the outage (it may really have
+    /// been several outages).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gap_inside: bool,
+    /// The recharge wasn't observed (monitoring gap after the outage).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recharge_unobserved: bool,
     /// Energy delivered from the battery (integrated output power).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub energy_wh: Option<f32>,
@@ -82,6 +97,9 @@ impl Outage {
             battery_v_min: None,
             power_estimated: false,
             runtime_test: false,
+            samples: 0,
+            gap_inside: false,
+            recharge_unobserved: false,
             energy_wh: None,
             recharged_at: None,
         }
@@ -114,6 +132,13 @@ impl Outage {
         Some(self.recharged_at? - self.end?)
     }
 
+    /// False when the charge never fell below [`RECHARGED_PCT`] (nothing to
+    /// recharge; `recharged_at` is then the end of the outage).
+    #[must_use]
+    pub fn recharge_needed(&self) -> bool {
+        self.charge_min_pct.is_none_or(|c| c < RECHARGED_PCT)
+    }
+
     /// Charge used during the outage, in percentage points.
     #[must_use]
     pub fn charge_used_pct(&self) -> Option<f32> {
@@ -137,6 +162,10 @@ impl Outage {
     }
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if signature
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
 /// Monitoring coverage of one local calendar day.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DailyCoverage {

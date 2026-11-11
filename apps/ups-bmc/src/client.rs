@@ -64,8 +64,14 @@ fn http<T: serde::de::DeserializeOwned>(config: &ClientConfig, path: &str) -> Re
         .map_err(|e| e.to_string())
 }
 
+/// Events this recent that happened while the live connection was down are
+/// still notified after reconnecting (review M1-7).
+const CATCH_UP_NOTIFY: chrono::Duration = chrono::Duration::minutes(5);
+
 fn run(config: &ClientConfig, send: &dyn Fn(Update)) {
     let mut tried_start = false;
+    // Newest event seen, so events missed during a reconnect are notified.
+    let mut last_event_id: Option<i64> = None;
     loop {
         // 1. Is the collector there?
         let Ok(status) = http::<StatusResponse>(config, "/api/v1/status") else {
@@ -109,11 +115,31 @@ fn run(config: &ClientConfig, send: &dyn Fn(Update)) {
             Utc::now(),
         ))));
         send(Update::Events(view::event_lines(&events, Utc::now())));
+        if let Some(last) = last_event_id {
+            let now = Utc::now();
+            for e in events
+                .iter()
+                .rev()
+                .filter(|e| e.id > last && now - e.ts < CATCH_UP_NOTIFY)
+            {
+                send(Update::Notify(e.clone()));
+            }
+        }
+        if let Some(newest) = events.iter().map(|e| e.id).max() {
+            last_event_id = Some(last_event_id.map_or(newest, |l| l.max(newest)));
+        }
         let mut outages = Outages::fetch(config);
         outages.send(send);
 
         // 3. Live updates until the connection drops.
-        if let Err(e) = live(config, send, &mut history, &mut events, &mut outages) {
+        if let Err(e) = live(
+            config,
+            send,
+            &mut history,
+            &mut events,
+            &mut outages,
+            &mut last_event_id,
+        ) {
             send(Update::View(Box::new(view::collector_offline(
                 &format!("Lost the connection to the collector ({e}). Reconnecting…"),
                 false,
@@ -129,6 +155,7 @@ fn live(
     history: &mut Vec<HistoryPoint>,
     events: &mut Vec<Event>,
     outages: &mut Outages,
+    last_event_id: &mut Option<i64>,
 ) -> Result<(), String> {
     let (mut ws, _) = tungstenite::connect(format!("ws://{}/api/v1/live", config.address))
         .map_err(|e| e.to_string())?;
@@ -167,6 +194,7 @@ fn live(
                 outages.send(send);
             }
             Ok(LiveMessage::Event(event)) => {
+                *last_event_id = Some(last_event_id.map_or(event.id, |l| l.max(event.id)));
                 events.insert(0, event.clone());
                 events.truncate(MAX_EVENTS);
                 send(Update::Events(view::event_lines(events, Utc::now())));
@@ -192,14 +220,19 @@ pub fn set_assumed_load(address: &str, watts: Option<f32>) -> Result<String, Str
 }
 
 /// Sets or clears the battery installation date.
+/// With `replaced_now`, the collector records the current time instead.
 pub fn set_battery_installed(
     address: &str,
     installed: Option<chrono::NaiveDate>,
+    replaced_now: bool,
 ) -> Result<String, String> {
     post(
         address,
         "settings/battery",
-        &ups_api::BatteryRequest { installed },
+        &ups_api::BatteryRequest {
+            installed,
+            replaced_now,
+        },
     )
 }
 
@@ -256,6 +289,10 @@ struct Outages {
     list: Vec<Outage>,
     stats: Option<StatsResponse>,
     health: Option<HealthReport>,
+    /// A newly fetched health report not yet sent to the UI. Only fresh
+    /// reports are sent: re-sending a cached one would undo a newer one the
+    /// UI just fetched itself (review M3-4).
+    health_fresh: bool,
     stats_at: Option<Instant>,
 }
 
@@ -279,6 +316,7 @@ impl Outages {
         }
         if let Ok(h) = http::<HealthReport>(config, "/api/v1/health") {
             self.health = Some(h);
+            self.health_fresh = true;
         }
     }
 
@@ -292,6 +330,9 @@ impl Outages {
 
     /// Inserts or replaces an outage. Returns true if it is new or has just ended.
     fn upsert(&mut self, outage: Outage) -> bool {
+        // Keep the list to the window the UI describes (review M2-11).
+        let cutoff = Utc::now() - chrono::Duration::days(i64::from(OUTAGE_DAYS));
+        self.list.retain(|o| o.start >= cutoff);
         if let Some(existing) = self.list.iter_mut().find(|o| o.id == outage.id) {
             let ended = existing.end.is_none() && outage.end.is_some();
             *existing = outage;
@@ -302,13 +343,16 @@ impl Outages {
         }
     }
 
-    fn send(&self, send: &dyn Fn(Update)) {
+    fn send(&mut self, send: &dyn Fn(Update)) {
         send(Update::Outages(Box::new(view::outages_view(
             &self.list,
             self.stats.as_ref(),
             Utc::now(),
         ))));
-        if let Some(h) = &self.health {
+        if self.health_fresh
+            && let Some(h) = &self.health
+        {
+            self.health_fresh = false;
             send(Update::Health(Box::new(h.clone())));
         }
     }

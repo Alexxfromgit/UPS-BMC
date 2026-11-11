@@ -201,6 +201,9 @@ pub fn build(r: &HealthReport, now: DateTime<Utc>) -> HealthView {
             if d.baseline {
                 notes.push("baseline");
             }
+            if !d.compared {
+                notes.push("not compared: load unknown");
+            }
             vec![
                 d.start
                     .with_timezone(&Local)
@@ -237,12 +240,18 @@ pub fn build(r: &HealthReport, now: DateTime<Utc>) -> HealthView {
         })
         .collect();
 
+    let compared = r.discharges.iter().filter(|d| d.compared).count();
     let summary = match (r.discharges.len(), r.skipped) {
         (0, 0) => "No outages recorded yet.".to_owned(),
         (n, s) => format!(
-            "{n} usable discharge{} · {s} other outage{} too short or partial. \
+            "{n} usable discharge{}{} · {s} other outage{} too short or partial. \
              \"Full runtime\" extrapolates each discharge to 100 → 0 %.",
             if n == 1 { "" } else { "s" },
+            if compared < n {
+                format!(" ({compared} compared)")
+            } else {
+                String::new()
+            },
             if s == 1 { "" } else { "s" }
         ),
     };
@@ -344,6 +353,7 @@ mod tests {
             sag_mv_per_pct: None,
             relative_pct: Some(rel),
             baseline,
+            compared: true,
         }
     }
 

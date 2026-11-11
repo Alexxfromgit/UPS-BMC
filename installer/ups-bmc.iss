@@ -58,6 +58,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Start UPS-BMC now"; Flags: nowait postinstall skipifsilent
+; Silent installs (scripted upgrades) have no "start now" page: restart
+; monitoring in the notification area anyway, since the upgrade stopped it.
+Filename: "{app}\{#AppExe}"; Parameters: "--minimized"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM ups-bmc.exe"; Flags: runhidden; RunOnceId: "StopUi"
@@ -66,11 +69,21 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM ups-collector.exe"; Flags: r
 [Code]
 // Upgrades replace the executables, so stop the running UI and collector
 // first. The collector has no window, so the Restart Manager can't close it.
+// Ask it to stop gracefully first (it then records "Collector stopped" and
+// saves pending data), and force it only if it is still running.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
 begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ups-bmc.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  if FileExists(ExpandConstant('{sys}\curl.exe')) then
+  begin
+    Exec(ExpandConstant('{sys}\curl.exe'),
+      '-s -m 3 -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:47800/api/v1/shutdown',
+      '', SW_HIDE, ewWaitUntilTerminated, Code);
+    if Code = 0 then
+      Sleep(4000);
+  end;
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ups-collector.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
   Result := '';
 end;

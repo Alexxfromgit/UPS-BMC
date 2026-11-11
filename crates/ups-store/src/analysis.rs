@@ -10,7 +10,7 @@ use crate::{Result, Store, StoreError, from_ms, ms};
 const OUTAGE_COLUMNS: &str = "id, start_ms, start_earliest_ms, end_ms, end_latest_ms, \
      charge_start, charge_end, charge_min, runtime_est_start_s, avg_load_pct, avg_power_w, \
      energy_wh, recharged_ms, battery_v_start, battery_v_end, battery_v_min, power_estimated, \
-     runtime_test";
+     runtime_test, samples, gap_inside, recharge_unobserved";
 
 fn outage_from_row(r: &Row<'_>) -> rusqlite::Result<Outage> {
     let t = |v: Option<i64>| v.map(from_ms);
@@ -33,6 +33,9 @@ fn outage_from_row(r: &Row<'_>) -> rusqlite::Result<Outage> {
         battery_v_min: r.get(15)?,
         power_estimated: r.get(16)?,
         runtime_test: r.get(17)?,
+        samples: r.get(18)?,
+        gap_inside: r.get(19)?,
+        recharge_unobserved: r.get(20)?,
     })
 }
 
@@ -57,14 +60,19 @@ impl Store {
             o.battery_v_min,
             o.power_estimated,
             o.runtime_test,
+            o.samples,
+            o.gap_inside,
+            o.recharge_unobserved,
         ];
         if o.id == 0 {
             self.conn.execute(
                 "INSERT INTO outages (start_ms, start_earliest_ms, end_ms, end_latest_ms,
                  charge_start, charge_end, charge_min, runtime_est_start_s, avg_load_pct,
                  avg_power_w, energy_wh, recharged_ms, battery_v_start, battery_v_end,
-                 battery_v_min, power_estimated, runtime_test)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                 battery_v_min, power_estimated, runtime_test, samples, gap_inside,
+                 recharge_unobserved)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                 ?18, ?19, ?20)",
                 values,
             )?;
             Ok(self.conn.last_insert_rowid())
@@ -74,7 +82,8 @@ impl Store {
                  end_latest_ms = ?4, charge_start = ?5, charge_end = ?6, charge_min = ?7,
                  runtime_est_start_s = ?8, avg_load_pct = ?9, avg_power_w = ?10,
                  energy_wh = ?11, recharged_ms = ?12, battery_v_start = ?13, battery_v_end = ?14,
-                 battery_v_min = ?15, power_estimated = ?16, runtime_test = ?17 WHERE id = ?18",
+                 battery_v_min = ?15, power_estimated = ?16, runtime_test = ?17, samples = ?18,
+                 gap_inside = ?19, recharge_unobserved = ?20 WHERE id = ?21",
             )?;
             let mut p: Vec<&dyn rusqlite::ToSql> = values.to_vec();
             p.push(&o.id);
@@ -101,21 +110,21 @@ impl Store {
             .optional()?)
     }
 
-    /// The most recent ended outage whose recharge hasn't been seen yet, if it
-    /// ended after `since`.
+    /// The newest outage, if it has ended after `since` and its recharge
+    /// hasn't been seen yet. Older outages without a recharge time were
+    /// interrupted by a later outage and are never resumed (review M2-3).
     pub fn recharging_outage(&self, since: DateTime<Utc>) -> Result<Option<Outage>> {
-        Ok(self
+        let newest = self
             .conn
             .query_row(
-                &format!(
-                    "SELECT {OUTAGE_COLUMNS} FROM outages \
-                     WHERE end_ms IS NOT NULL AND recharged_ms IS NULL AND end_ms >= ?1 \
-                     ORDER BY start_ms DESC LIMIT 1"
-                ),
-                [ms(since)],
+                &format!("SELECT {OUTAGE_COLUMNS} FROM outages ORDER BY start_ms DESC LIMIT 1"),
+                [],
                 outage_from_row,
             )
-            .optional()?)
+            .optional()?;
+        Ok(newest.filter(|o| {
+            o.end.is_some_and(|e| e >= since) && o.recharged_at.is_none() && !o.recharge_unobserved
+        }))
     }
 
     /// Outages that started at or after `from`, newest first (at most `limit`).
@@ -129,6 +138,15 @@ impl Store {
             outage_from_row,
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Deletes all outages and daily coverage (before rebuilding them).
+    pub fn clear_analysis(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM outages", [])?;
+        tx.execute("DELETE FROM daily", [])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn outage_count(&self) -> Result<u64> {
@@ -183,14 +201,16 @@ impl Store {
         Ok(out)
     }
 
-    fn meta(&self, key: &str) -> Result<Option<String>> {
+    /// A value from the key/value `meta` table.
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .optional()?)
     }
 
-    fn set_meta(&mut self, key: &str, value: Option<String>) -> Result<()> {
+    /// Sets (or, with `None`, deletes) a `meta` value.
+    pub fn set_meta(&mut self, key: &str, value: Option<String>) -> Result<()> {
         match value {
             Some(v) => self.conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -218,9 +238,27 @@ impl Store {
         Ok(self.meta("battery_installed")?.and_then(|v| v.parse().ok()))
     }
 
-    /// Sets or clears the battery installation date.
-    pub fn set_battery_installed(&mut self, date: Option<NaiveDate>) -> Result<()> {
-        self.set_meta("battery_installed", date.map(|d| d.to_string()))
+    /// Sets or clears the battery installation date. `at` is the exact time
+    /// when known ("replaced today"), so outages earlier that day, on the old
+    /// battery, are not counted for the new one (review M3-8).
+    pub fn set_battery_installed(
+        &mut self,
+        date: Option<NaiveDate>,
+        at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        self.set_meta("battery_installed", date.map(|d| d.to_string()))?;
+        self.set_meta(
+            "battery_installed_at",
+            at.filter(|_| date.is_some()).map(|t| t.to_rfc3339()),
+        )
+    }
+
+    /// The exact installation time, if it was recorded with the date.
+    pub fn battery_installed_at(&self) -> Result<Option<DateTime<Utc>>> {
+        Ok(self
+            .meta("battery_installed_at")?
+            .and_then(|v| DateTime::parse_from_rfc3339(&v).ok())
+            .map(|t| t.with_timezone(&Utc)))
     }
 
     /// All stored daily coverage, oldest first.
@@ -292,6 +330,8 @@ mod tests {
         o.battery_v_min = Some(12.4);
         o.power_estimated = true;
         o.runtime_test = true;
+        o.samples = 42;
+        o.gap_inside = true;
         o.id = s.save_outage(&o).unwrap();
         assert_eq!(s.open_outage().unwrap(), Some(o.clone()));
 
@@ -310,6 +350,23 @@ mod tests {
         let mut missing = o.clone();
         missing.id = 999;
         assert!(s.save_outage(&missing).is_err());
+    }
+
+    #[test]
+    fn resumes_only_the_newest_outage_for_recharge() {
+        // Review M2-3: A's recharge was interrupted by B; B is recharged.
+        let mut s = Store::open_in_memory().unwrap();
+        let mut a = Outage::started(t0());
+        a.end = Some(t0() + Duration::minutes(5));
+        s.save_outage(&a).unwrap();
+        let mut b = Outage::started(t0() + Duration::minutes(30));
+        b.end = Some(t0() + Duration::minutes(35));
+        b.recharged_at = Some(t0() + Duration::minutes(60));
+        b.id = s.save_outage(&b).unwrap();
+        assert_eq!(s.recharging_outage(t0()).unwrap(), None);
+        b.recharged_at = None;
+        s.save_outage(&b).unwrap();
+        assert_eq!(s.recharging_outage(t0()).unwrap().map(|o| o.id), Some(b.id));
     }
 
     #[test]
@@ -334,10 +391,15 @@ mod tests {
         assert_eq!(s.assumed_load_w().unwrap(), None);
 
         assert_eq!(s.battery_installed().unwrap(), None);
-        s.set_battery_installed(Some(d)).unwrap();
+        s.set_battery_installed(Some(d), None).unwrap();
         assert_eq!(s.battery_installed().unwrap(), Some(d));
-        s.set_battery_installed(None).unwrap();
+        assert_eq!(s.battery_installed_at().unwrap(), None);
+        let at = t0();
+        s.set_battery_installed(Some(d), Some(at)).unwrap();
+        assert_eq!(s.battery_installed_at().unwrap(), Some(at));
+        s.set_battery_installed(None, Some(at)).unwrap();
         assert_eq!(s.battery_installed().unwrap(), None);
+        assert_eq!(s.battery_installed_at().unwrap(), None);
     }
 
     #[test]

@@ -56,3 +56,18 @@ The user asked for beeper on/off. It is harmless: it only controls the audible a
   JSON body, so web pages can't change UPS settings (CSRF) through `127.0.0.1`.
 - UI: Settings → UPS beeper switch, available only while a supporting UPS is
   connected.
+
+### Deviations from the proposed decision (deliberate, for the beeper only)
+- **No confirmation dialog:** the beeper only affects the audible alarm, the
+  change is verified by reading it back, logged, and undone with one click.
+  Output-affecting settings (M5) will still need confirmation.
+- **"Per model" is enforced by structure, not a VID/PID table:** the write is
+  allowed only when the beeper field is a writable Feature field *and the
+  only writable field in its report* (`control::supports`). Re-sending other
+  writable fields could start a battery test (`Test`) or re-arm a shutdown
+  (`DelayBeforeShutdown`) on some UPSes, so such devices are refused (review
+  M1-3; covered by a test with a synthetic descriptor). On the Eaton 5E,
+  report 0x14 holds only `AudibleAlarmControl`. M5 settings that share
+  reports with other fields need the explicit per-model table.
+- If the API call times out, the queued write is dropped instead of being
+  applied later.

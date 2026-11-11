@@ -111,6 +111,9 @@ thread_local! {
     static TREND: RefCell<health_view::TrendData> = RefCell::default();
     /// The installation date last shown, so typing isn't overwritten.
     static SHOWN_INSTALLED: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// When the health report shown was generated; older ones are ignored.
+    static SHOWN_HEALTH_AT: RefCell<Option<chrono::DateTime<chrono::Utc>>> =
+        const { RefCell::new(None) };
 }
 
 fn render_trend(w: &AppWindow) {
@@ -126,6 +129,18 @@ fn render_trend(w: &AppWindow) {
 }
 
 fn apply_health(w: &AppWindow, report: &HealthReport) {
+    // Reports arrive from two threads (periodic refresh, and after a change
+    // made here); never let an older one replace a newer one (review M3-4).
+    let newer = SHOWN_HEALTH_AT.with_borrow_mut(|shown| {
+        if shown.is_some_and(|t| t > report.generated_at) {
+            return false;
+        }
+        *shown = Some(report.generated_at);
+        true
+    });
+    if !newer {
+        return;
+    }
     let v = health_view::build(report, chrono::Utc::now());
     let s = |x: &str| SharedString::from(x);
     w.set_health_level(v.level);
@@ -213,18 +228,19 @@ fn wire_health(window: &AppWindow, collector: &str) {
         request_then_refresh(
             w.clone(),
             address.clone(),
-            move |a| client::set_battery_installed(a, date),
+            move |a| client::set_battery_installed(a, date, false),
             AppWindow::set_battery_message,
         );
     });
 
     let (w, address) = (window.as_weak(), collector.to_owned());
     window.on_battery_replaced_today(move || {
-        let today = chrono::Local::now().date_naive();
+        // The collector records the exact time, so outages earlier today (on
+        // the old battery) don't count for the new one (review M3-8).
         request_then_refresh(
             w.clone(),
             address.clone(),
-            move |a| client::set_battery_installed(a, Some(today)),
+            move |a| client::set_battery_installed(a, None, true),
             AppWindow::set_battery_message,
         );
     });

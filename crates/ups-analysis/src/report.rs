@@ -63,8 +63,15 @@ fn notes(o: &Outage) -> String {
     if !o.end_observed() {
         n.push("end not observed (monitoring gap)".to_owned());
     }
-    if o.end.is_some() && o.recharged_at.is_none() {
-        n.push("recharge not completed/observed".to_owned());
+    if o.gap_inside {
+        n.push("monitoring gap during the outage".to_owned());
+    }
+    if o.recharge_unobserved {
+        n.push("recharge not observed (monitoring gap)".to_owned());
+    } else if o.end.is_some() && o.recharged_at.is_none() {
+        n.push("recharge interrupted or still in progress".to_owned());
+    } else if o.recharged_at.is_some() && !o.recharge_needed() {
+        n.push("no recharge needed".to_owned());
     }
     n.join("; ")
 }
@@ -269,6 +276,10 @@ fn csv_field(s: &str) -> String {
 }
 
 /// CSV of the outages that started in the month (local times, plain numbers).
+///
+/// It starts with a UTF-8 BOM and a `sep=,` line so Excel opens it in
+/// columns even where its list separator is `;` (review M2-10). `start_utc`
+/// and `end_utc` are unambiguous during the DST fall-back hour.
 pub fn monthly_csv<Tz: TimeZone>(
     year: i32,
     month: u32,
@@ -281,10 +292,12 @@ where
 {
     let (first, last) = month_range(year, month)?;
     let mut out = String::from(
-        "start,end,duration_s,start_observed,end_observed,charge_start_pct,charge_end_pct,\
-         charge_min_pct,ups_runtime_estimate_s,avg_load_pct,avg_power_w,energy_wh,recharge_s,\
-         battery_v_start,battery_v_end,battery_v_min,power_estimated,notes\r\n",
+        "\u{feff}sep=,\r\nstart,end,duration_s,start_observed,end_observed,charge_start_pct,\
+         charge_end_pct,charge_min_pct,ups_runtime_estimate_s,avg_load_pct,avg_power_w,energy_wh,\
+         recharge_s,battery_v_start,battery_v_end,battery_v_min,power_estimated,runtime_test,\
+         notes,start_utc,end_utc\r\n",
     );
+    let utc = |t: DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let num = |v: Option<f64>| v.map(|v| format!("{v:.1}")).unwrap_or_default();
     for o in month_outages(outages, first, last, tz) {
         let row = [
@@ -309,7 +322,10 @@ where
             num(o.battery_v_end.map(f64::from)),
             num(o.battery_v_min.map(f64::from)),
             o.power_estimated.to_string(),
+            o.runtime_test.to_string(),
             notes(o),
+            utc(o.start),
+            o.end.map(utc).unwrap_or_default(),
         ];
         let line: Vec<String> = row.iter().map(|f| csv_field(f)).collect();
         out.push_str(&line.join(","));
@@ -400,13 +416,16 @@ mod tests {
         let (outages, _, now) = sample();
         let csv = monthly_csv(2026, 11, &outages, &Utc, now).unwrap();
         let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines.len(), 3, "{csv}");
-        assert!(lines[0].starts_with("start,end,duration_s"));
+        assert_eq!(lines.len(), 4, "{csv}");
+        assert_eq!(lines[0], "\u{feff}sep=,");
+        assert!(lines[1].starts_with("start,end,duration_s"));
+        assert!(lines[1].ends_with(",notes,start_utc,end_utc"));
         assert!(
-            lines[1]
+            lines[2]
                 .starts_with("2026-11-10 08:00:00,2026-11-10 08:12:00,720,true,true,100.0,81.0")
         );
-        assert!(lines[2].contains(",true,false,"));
+        assert!(lines[2].ends_with(",2026-11-10T08:00:00Z,2026-11-10T08:12:00Z"));
+        assert!(lines[3].contains(",true,false,"));
         assert_eq!(csv_field("a,b"), "\"a,b\"");
         assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(file_name(2026, 11, "csv"), "UPS-BMC report 2026-11.csv");

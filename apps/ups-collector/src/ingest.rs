@@ -25,7 +25,12 @@ pub struct Ingest {
     pub status: Arc<RwLock<StatusResponse>>,
     pub live: broadcast::Sender<LiveMessage>,
     pub retention: chrono::Duration,
+    pub poll: Duration,
 }
+
+/// `meta` key holding the runtime test in progress (JSON), so a collector
+/// restart doesn't lose it (review M3-3).
+const META_RUNTIME_TEST: &str = "runtime_test";
 
 impl Ingest {
     pub fn spawn(self, rx: Receiver<PollerMsg>) -> std::io::Result<JoinHandle<()>> {
@@ -36,18 +41,14 @@ impl Ingest {
 
     fn run(mut self, rx: &Receiver<PollerMsg>) {
         let mut detector = EventDetector::default();
-        let mut analysis = OutageAnalysis::start(&mut self.store);
+        let mut analysis = OutageAnalysis::start(&mut self.store, self.poll);
         let assumed = self.store.assumed_load_w().ok().flatten();
         analysis.set_assumed_power(assumed);
         self.update(|s| s.assumed_load_w = assumed);
         let mut last_prune: Option<Instant> = None;
-        let mut test = RuntimeTest::default();
+        let mut test = self.restore_test();
         let mut latest: Option<Snapshot> = None;
-        self.record(Event::new(
-            Utc::now(),
-            EventKind::CollectorStarted,
-            format!("Collector {} started", env!("CARGO_PKG_VERSION")),
-        ));
+        self.record_start();
 
         // Ends when the poller stops and drops its sender.
         for msg in rx {
@@ -91,10 +92,10 @@ impl Ingest {
                     let _ = reply.send(result);
                     Vec::new()
                 }
-                PollerMsg::SetBatteryInstalled { date, reply } => {
+                PollerMsg::SetBatteryInstalled { date, at, reply } => {
                     let result = self
                         .store
-                        .set_battery_installed(date)
+                        .set_battery_installed(date, at)
                         .map_err(|e| e.to_string());
                     let ok = result.is_ok();
                     let _ = reply.send(result);
@@ -109,11 +110,18 @@ impl Ingest {
                     }
                 }
                 PollerMsg::RuntimeTest { request, reply } => {
+                    let was_discharging = test.discharging();
                     let (result, events) =
                         runtime_test_request(&mut test, request, latest.as_ref());
                     let _ = reply.send(result);
-                    let status = test.status().cloned();
-                    self.update(|s| s.runtime_test = status);
+                    if was_discharging && test.status().is_none() {
+                        // Cancelled mid-discharge: not a test (review M3-6).
+                        analysis.set_testing(false);
+                        for o in analysis.clear_test_tag(&mut self.store) {
+                            let _ = self.live.send(LiveMessage::Outage(o));
+                        }
+                    }
+                    self.save_test(&test);
                     events
                 }
                 PollerMsg::Snapshot(snapshot) => {
@@ -151,26 +159,82 @@ impl Ingest {
             error!(error = %e, "could not store sample");
         }
         let mut events = detector.on_snapshot(&snapshot);
+        let before = test.status().cloned();
         let notices = test.on_snapshot(&snapshot);
         analysis.set_testing(test.discharging());
         let mut finished: Option<Outage> = None;
-        for outage in analysis.on_snapshot(&mut self.store, &snapshot) {
+        let mut changed = analysis.on_snapshot(&mut self.store, &snapshot);
+        if notices.contains(&TestNotice::Interrupted) {
+            // A mains blip: that short outage was not the test (review M3-6).
+            changed.extend(analysis.clear_test_tag(&mut self.store));
+        }
+        for outage in changed {
             if outage.runtime_test && outage.end.is_some() {
                 finished = Some(outage.clone());
             }
             let _ = self.live.send(LiveMessage::Outage(outage));
+        }
+        if test.status() != before.as_ref() {
+            self.save_test(test);
         }
         events.extend(
             notices
                 .into_iter()
                 .map(|n| test_event(snapshot.ts, &n, finished.as_ref())),
         );
-        let status = test.status().cloned();
-        self.update(|s| {
-            s.snapshot = Some(snapshot);
-            s.runtime_test = status;
-        });
+        self.update(|s| s.snapshot = Some(snapshot));
         events
+    }
+
+    /// The runtime test saved before a restart, if any (review M3-3).
+    fn restore_test(&mut self) -> RuntimeTest {
+        let mut test = RuntimeTest::default();
+        if let Some(saved) = self
+            .store
+            .meta(META_RUNTIME_TEST)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+        {
+            test.restore(saved);
+        }
+        let status = test.status().cloned();
+        self.update(|s| s.runtime_test = status);
+        test
+    }
+
+    /// Records the start, noting when the previous run didn't stop cleanly
+    /// (PC shutdown, crash or forced update; review M1-5).
+    fn record_start(&mut self) {
+        let clean_stop = self
+            .store
+            .recent_events(1)
+            .ok()
+            .and_then(|e| e.first().map(|e| e.kind))
+            .is_none_or(|k| k == EventKind::CollectorStopped);
+        let version = env!("CARGO_PKG_VERSION");
+        self.record(Event::new(
+            Utc::now(),
+            EventKind::CollectorStarted,
+            if clean_stop {
+                format!("Collector {version} started")
+            } else {
+                format!(
+                    "Collector {version} started (the previous run ended without a clean stop, \
+                     e.g. a PC shutdown or an update)"
+                )
+            },
+        ));
+    }
+
+    /// Saves the runtime test state and publishes it in the live status.
+    fn save_test(&mut self, test: &RuntimeTest) {
+        let status = test.status().cloned();
+        let json = status.as_ref().and_then(|s| serde_json::to_string(s).ok());
+        if let Err(e) = self.store.set_meta(META_RUNTIME_TEST, json) {
+            warn!(error = %e, "could not save the runtime test state");
+        }
+        self.update(|s| s.runtime_test = status);
     }
 
     /// Deletes samples older than the retention period.
@@ -289,6 +353,12 @@ fn test_event(ts: chrono::DateTime<Utc>, notice: &TestNotice, finished: Option<&
                 },
             )
         }
+        TestNotice::Interrupted => Event::new(
+            ts,
+            EventKind::RuntimeTest,
+            "Mains power came back within a minute: the runtime test is armed again. Unplug the \
+             UPS to start it.",
+        ),
         TestNotice::Expired => Event::new(
             ts,
             EventKind::RuntimeTest,

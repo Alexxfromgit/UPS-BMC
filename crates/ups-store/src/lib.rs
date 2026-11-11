@@ -86,6 +86,11 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE outages ADD COLUMN runtime_test INTEGER NOT NULL DEFAULT 0;
 ",
+    r"
+    ALTER TABLE outages ADD COLUMN samples INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE outages ADD COLUMN gap_inside INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE outages ADD COLUMN recharge_unobserved INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 mod analysis;
@@ -227,8 +232,11 @@ impl Store {
         let mut events = Vec::new();
         for row in rows {
             let (id, ts, kind, message) = row?;
-            let kind = EventKind::parse(&kind)
-                .ok_or_else(|| StoreError::Corrupt(format!("unknown event kind {kind}")))?;
+            // Kinds from a newer version (after a downgrade) are skipped
+            // rather than failing the whole list (review M1-9).
+            let Some(kind) = EventKind::parse(&kind) else {
+                continue;
+            };
             events.push(Event {
                 id,
                 ..Event::new(from_ms(ts), kind, message)
@@ -395,6 +403,15 @@ mod tests {
         let events = s.recent_events(10).unwrap();
         assert_eq!(events, [b, a]);
         assert_eq!(s.recent_events(1).unwrap().len(), 1);
+
+        // A kind written by a newer version doesn't break the list.
+        s.conn
+            .execute(
+                "INSERT INTO events (ts_ms, kind, severity, message) VALUES (1, 'from_the_future', 'info', 'x')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(s.recent_events(10).unwrap().len(), 2);
     }
 
     #[test]

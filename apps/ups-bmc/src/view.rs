@@ -775,6 +775,9 @@ const OUTAGE_COLUMNS: [&str; 10] = [
 
 /// Rows shown in the table (the API returns up to 500).
 const MAX_ROWS: usize = 200;
+/// How long the collector waits for a recharge after an outage (it doesn't
+/// resume recharge tracking for older outages after a restart).
+const RECHARGE_WAIT: chrono::Duration = chrono::Duration::hours(12);
 
 #[allow(clippy::cast_precision_loss)] // durations far below 2^52 ms
 fn secs(d: chrono::Duration) -> f64 {
@@ -829,6 +832,9 @@ pub fn outages_view(
             if !o.end_observed() {
                 notes.push("end not observed");
             }
+            if o.gap_inside {
+                notes.push("monitoring gap during the outage");
+            }
             vec![
                 o.start
                     .with_timezone(&Local)
@@ -865,9 +871,16 @@ pub fn outages_view(
                     }
                 }),
                 match (o.recharge_duration(), o.end) {
+                    (Some(_), _) if !o.recharge_needed() => "not needed".to_owned(),
                     (Some(d), _) => format::duration(secs(d)),
-                    // Newest first: only the newest outage can still be recharging.
-                    (None, Some(_)) if i == 0 => "in progress".to_owned(),
+                    (None, Some(_)) if o.recharge_unobserved => "not observed".to_owned(),
+                    // Newest first: only the newest outage can still be
+                    // recharging, and the collector stops waiting after 12 h
+                    // (review M2-5).
+                    (None, Some(e)) if i == 0 && now - e < RECHARGE_WAIT => {
+                        "in progress".to_owned()
+                    }
+                    (None, Some(_)) if i == 0 => "not observed".to_owned(),
                     (None, Some(_)) => "interrupted".to_owned(),
                     (None, None) => dash(),
                 },
@@ -886,11 +899,18 @@ pub fn outages_view(
             )
         })
         .collect();
-    let summary = match outages.len() {
+    let mut summary = match outages.len() {
         0 => "No outages recorded in the last 90 days.".to_owned(),
         1 => "1 outage in the last 90 days.".to_owned(),
         n => format!("{n} outages in the last 90 days, newest first."),
     };
+    if outages.len() > MAX_ROWS {
+        // Review M2-11: say the table is cut.
+        let _ = write!(
+            summary,
+            " Showing the newest {MAX_ROWS}; the monthly reports have all of them."
+        );
+    }
     OutagesView {
         cards,
         rows,
@@ -951,8 +971,36 @@ mod outage_tests {
         assert_eq!(v.rows[1][6], "96 W (20 %)");
         assert_eq!(v.rows[1][4], "13.6 → 12.4 V");
         assert_eq!(v.rows[1][8], "1 h 08 min");
+        assert_eq!(v.rows[0][8], "—", "ongoing");
         assert_eq!(v.rows[1].len(), OUTAGE_COLUMNS.len());
         assert_eq!(v.month_labels, ["November 2026"]);
         assert!(v.summary.starts_with("2 outages"));
+    }
+
+    #[test]
+    fn labels_recharge_states() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap();
+        let ended = |hours_ago: i64| {
+            let mut o = Outage::started(now - Duration::hours(hours_ago) - Duration::minutes(5));
+            o.end = Some(now - Duration::hours(hours_ago));
+            o.charge_min_pct = Some(80.0);
+            o
+        };
+        let recharge =
+            |o: &Outage| outages_view(std::slice::from_ref(o), None, now).rows[0][8].clone();
+        assert_eq!(recharge(&ended(1)), "in progress");
+        assert_eq!(recharge(&ended(13)), "not observed", "review M2-5");
+        let mut gap = ended(1);
+        gap.recharge_unobserved = true;
+        assert_eq!(recharge(&gap), "not observed");
+        let mut full = ended(1);
+        full.charge_min_pct = Some(100.0);
+        full.recharged_at = full.end;
+        assert_eq!(recharge(&full), "not needed");
+
+        let many: Vec<Outage> = (0..250).map(|i| ended(i + 1)).collect();
+        let v = outages_view(&many, None, now);
+        assert_eq!(v.rows.len(), 200);
+        assert!(v.summary.contains("Showing the newest 200"));
     }
 }

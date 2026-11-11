@@ -32,15 +32,34 @@ fn target_and_value(setting: Setting) -> (Target, i64) {
     }
 }
 
-/// Whether the device supports `setting` (field present and writable).
+/// Whether the device supports `setting`: the field is present and writable,
+/// and it is the *only* writable field in its feature report.
+///
+/// A write sends the whole report back. If other writable fields shared it,
+/// re-sending their read values could have side effects (on HID UPSes,
+/// writing back `Test` = 1 starts a battery test; writing back a running
+/// `DelayBeforeShutdown` re-arms a shutdown). So such reports are refused
+/// (review M1-3). On the Eaton 5E, report 0x14 holds only the beeper field.
 pub fn supports(descriptor: &ReportDescriptor, mapping: &Mapping, setting: Setting) -> bool {
     let (target, _) = target_and_value(setting);
-    mapping
+    let Some((index, field)) = mapping
         .bindings()
         .iter()
         .find(|b| b.target == target)
-        .and_then(|b| descriptor.fields().get(b.field))
-        .is_some_and(|f| f.kind == ReportKind::Feature && !f.is_constant())
+        .and_then(|b| descriptor.fields().get(b.field).map(|f| (b.field, f)))
+    else {
+        return false;
+    };
+    field.kind == ReportKind::Feature
+        && !field.is_constant()
+        && descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| {
+                *i != index && f.kind == ReportKind::Feature && f.report_id == field.report_id
+            })
+            .all(|(_, f)| f.is_constant())
 }
 
 /// Applies `setting` and verifies it by reading the report back. On success the
@@ -130,6 +149,23 @@ mod tests {
         let d = ReportDescriptor::parse(&bytes).unwrap();
         let m = Mapping::build(&d);
         assert!(supports(&d, &m, Setting::Beeper { enabled: true }));
+
+        // A beeper sharing its report with another writable field (here the
+        // battery `Test` control) is refused (review M1-3).
+        #[rustfmt::skip]
+        let shared: &[u8] = &[
+            0x05, 0x84, 0x09, 0x04, 0xA1, 0x01,       // UPS, application
+            0x09, 0x24, 0xA1, 0x02,                   //   PowerSummary, logical
+            0x85, 0x14,                               //   report 0x14
+            0x15, 0x01, 0x25, 0x03, 0x75, 0x08, 0x95, 0x01,
+            0x09, 0x5A, 0xB1, 0x02,                   //   AudibleAlarmControl, Feature (Data,Var)
+            0x09, 0x58, 0xB1, 0x02,                   //   Test, Feature (Data,Var)
+            0xC0, 0xC0,
+        ];
+        let d = ReportDescriptor::parse(shared).unwrap();
+        let m = Mapping::build(&d);
+        assert!(m.bindings().iter().any(|b| b.target == Target::Beeper));
+        assert!(!supports(&d, &m, Setting::Beeper { enabled: true }));
         assert_eq!(
             target_and_value(Setting::Beeper { enabled: false }),
             (Target::Beeper, BEEPER_DISABLED)

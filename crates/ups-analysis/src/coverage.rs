@@ -36,6 +36,11 @@ impl<Tz: TimeZone> CoverageTracker<Tz> {
         let on_battery = s.on_battery().unwrap_or(false);
         if let Some((prev, prev_on_battery)) = self.last {
             if s.ts <= prev {
+                // Duplicates and jitter are ignored; a clock set back further
+                // than a gap restarts counting from here (review M2-9).
+                if prev - s.ts > self.gap {
+                    self.last = Some((s.ts, on_battery));
+                }
                 return;
             }
             if s.ts - prev <= self.gap {
@@ -52,9 +57,7 @@ impl<Tz: TimeZone> CoverageTracker<Tz> {
             let day = from.with_timezone(&self.tz).date_naive();
             let next_midnight = day
                 .succ_opt()
-                .and_then(|d| d.and_hms_opt(0, 0, 0))
-                .and_then(|m| self.tz.from_local_datetime(&m).earliest())
-                .map_or(to, |m| m.with_timezone(&Utc));
+                .map_or(to, |d| crate::stats::local_midnight(&self.tz, d));
             let until = to.min(next_midnight);
             if until <= from {
                 break; // defensive: time zone oddities must not loop forever
@@ -118,5 +121,19 @@ mod tests {
         );
         assert_eq!((days[1].monitored_s, days[1].on_battery_s), (20.0, 10.0));
         assert!(c.take().is_empty(), "take drains");
+    }
+
+    #[test]
+    fn restarts_after_the_clock_is_set_back() {
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let mut c = CoverageTracker::new(tz, Duration::seconds(30));
+        let base = Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap();
+        c.feed(&snap(base, false));
+        c.feed(&snap(base - Duration::hours(1), false));
+        c.feed(&snap(
+            base - Duration::hours(1) + Duration::seconds(10),
+            false,
+        ));
+        assert_eq!(c.take()[0].monitored_s, 10.0);
     }
 }
