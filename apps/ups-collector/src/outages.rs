@@ -103,6 +103,11 @@ impl OutageAnalysis {
         stored
     }
 
+    /// Load estimate used when the UPS reports 0 W.
+    pub fn set_assumed_power(&mut self, watts: Option<f32>) {
+        self.tracker.set_assumed_power(watts);
+    }
+
     /// Writes pending coverage increments.
     pub fn flush(&mut self, store: &mut Store) {
         self.last_flush = Instant::now();

@@ -26,6 +26,11 @@ pub enum PollerMsg {
     Disconnected(String),
     /// A setting was changed and verified (human-readable description).
     SettingChanged(String),
+    /// From the API: set or clear the load estimate (handled by ingest).
+    SetAssumedLoad {
+        watts: Option<f32>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Requests to the poller.

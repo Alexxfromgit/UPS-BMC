@@ -9,7 +9,7 @@ use crate::{Result, Store, StoreError, from_ms, ms};
 
 const OUTAGE_COLUMNS: &str = "id, start_ms, start_earliest_ms, end_ms, end_latest_ms, \
      charge_start, charge_end, charge_min, runtime_est_start_s, avg_load_pct, avg_power_w, \
-     energy_wh, recharged_ms";
+     energy_wh, recharged_ms, battery_v_start, battery_v_end, battery_v_min, power_estimated";
 
 fn outage_from_row(r: &Row<'_>) -> rusqlite::Result<Outage> {
     let t = |v: Option<i64>| v.map(from_ms);
@@ -27,6 +27,10 @@ fn outage_from_row(r: &Row<'_>) -> rusqlite::Result<Outage> {
         avg_power_w: r.get(10)?,
         energy_wh: r.get(11)?,
         recharged_at: t(r.get(12)?),
+        battery_v_start: r.get(13)?,
+        battery_v_end: r.get(14)?,
+        battery_v_min: r.get(15)?,
+        power_estimated: r.get(16)?,
     })
 }
 
@@ -46,13 +50,18 @@ impl Store {
             o.avg_power_w,
             o.energy_wh,
             o.recharged_at.map(ms),
+            o.battery_v_start,
+            o.battery_v_end,
+            o.battery_v_min,
+            o.power_estimated,
         ];
         if o.id == 0 {
             self.conn.execute(
                 "INSERT INTO outages (start_ms, start_earliest_ms, end_ms, end_latest_ms,
                  charge_start, charge_end, charge_min, runtime_est_start_s, avg_load_pct,
-                 avg_power_w, energy_wh, recharged_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 avg_power_w, energy_wh, recharged_ms, battery_v_start, battery_v_end,
+                 battery_v_min, power_estimated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 values,
             )?;
             Ok(self.conn.last_insert_rowid())
@@ -61,7 +70,8 @@ impl Store {
                 "UPDATE outages SET start_ms = ?1, start_earliest_ms = ?2, end_ms = ?3,
                  end_latest_ms = ?4, charge_start = ?5, charge_end = ?6, charge_min = ?7,
                  runtime_est_start_s = ?8, avg_load_pct = ?9, avg_power_w = ?10,
-                 energy_wh = ?11, recharged_ms = ?12 WHERE id = ?13",
+                 energy_wh = ?11, recharged_ms = ?12, battery_v_start = ?13, battery_v_end = ?14,
+                 battery_v_min = ?15, power_estimated = ?16 WHERE id = ?17",
             )?;
             let mut p: Vec<&dyn rusqlite::ToSql> = values.to_vec();
             p.push(&o.id);
@@ -170,6 +180,33 @@ impl Store {
         Ok(out)
     }
 
+    /// The user's estimate of the protected load (watts), if set.
+    pub fn assumed_load_w(&self) -> Result<Option<f32>> {
+        let v: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'assumed_load_w'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v.and_then(|v| v.parse().ok()))
+    }
+
+    /// Sets or clears the load estimate.
+    pub fn set_assumed_load_w(&mut self, watts: Option<f32>) -> Result<()> {
+        match watts {
+            Some(w) => self.conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('assumed_load_w', ?1)",
+                [w.to_string()],
+            )?,
+            None => self
+                .conn
+                .execute("DELETE FROM meta WHERE key = 'assumed_load_w'", [])?,
+        };
+        Ok(())
+    }
+
     /// All stored daily coverage, oldest first.
     pub fn all_daily(&self) -> Result<Vec<DailyCoverage>> {
         let (Some(first), Some(last)) = (
@@ -201,7 +238,7 @@ impl Store {
     /// Replays all stored samples, oldest first (for backfilling analysis).
     pub fn for_each_sample(&self, mut f: impl FnMut(&Snapshot)) -> Result<()> {
         let mut stmt = self.conn.prepare(
-            "SELECT ts_ms, status, charge, runtime_s, load_pct, realpower_w FROM samples
+            "SELECT ts_ms, status, charge, runtime_s, load_pct, realpower_w, battery_v FROM samples
              ORDER BY ts_ms",
         )?;
         let mut rows = stmt.query([])?;
@@ -214,6 +251,7 @@ impl Store {
             s.battery_runtime_s = r.get(3)?;
             s.load_pct = r.get(4)?;
             s.realpower_w = r.get(5)?;
+            s.battery_voltage_v = r.get(6)?;
             f(&s);
         }
         Ok(())
@@ -235,6 +273,8 @@ mod tests {
         let mut s = Store::open_in_memory().unwrap();
         let mut o = Outage::started(t0());
         o.charge_start_pct = Some(100.0);
+        o.battery_v_min = Some(12.4);
+        o.power_estimated = true;
         o.id = s.save_outage(&o).unwrap();
         assert_eq!(s.open_outage().unwrap(), Some(o.clone()));
 
@@ -269,6 +309,12 @@ mod tests {
         let days = s.daily(d, d).unwrap();
         assert_eq!(days[0].monitored_s, 20.0);
         assert_eq!(days[0].on_battery_s, 4.0);
+
+        assert_eq!(s.assumed_load_w().unwrap(), None);
+        s.set_assumed_load_w(Some(20.0)).unwrap();
+        assert_eq!(s.assumed_load_w().unwrap(), Some(20.0));
+        s.set_assumed_load_w(None).unwrap();
+        assert_eq!(s.assumed_load_w().unwrap(), None);
     }
 
     #[test]

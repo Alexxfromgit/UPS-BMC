@@ -36,6 +36,9 @@ impl Ingest {
     fn run(mut self, rx: &Receiver<PollerMsg>) {
         let mut detector = EventDetector::default();
         let mut analysis = OutageAnalysis::start(&mut self.store);
+        let assumed = self.store.assumed_load_w().ok().flatten();
+        analysis.set_assumed_power(assumed);
+        self.update(|s| s.assumed_load_w = assumed);
         let mut last_prune: Option<Instant> = None;
         self.record(Event::new(
             Utc::now(),
@@ -72,6 +75,18 @@ impl Ingest {
                 }
                 PollerMsg::SettingChanged(message) => {
                     vec![Event::new(now, EventKind::SettingChanged, message)]
+                }
+                PollerMsg::SetAssumedLoad { watts, reply } => {
+                    let result = self
+                        .store
+                        .set_assumed_load_w(watts)
+                        .map_err(|e| e.to_string());
+                    if result.is_ok() {
+                        analysis.set_assumed_power(watts);
+                        self.update(|s| s.assumed_load_w = watts);
+                    }
+                    let _ = reply.send(result);
+                    Vec::new()
                 }
                 PollerMsg::Snapshot(snapshot) => {
                     if let Err(e) = self.store.insert_sample(&snapshot) {

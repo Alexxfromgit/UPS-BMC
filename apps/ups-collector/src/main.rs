@@ -161,11 +161,13 @@ fn main() -> Result<()> {
         connection: Connection::Connecting,
         device: store.device().ok().flatten(),
         capabilities: Vec::new(),
+        assumed_load_w: None,
         snapshot: None,
     }));
     let (live, _) = broadcast::channel(256);
 
     let (poll_tx, poll_rx) = mpsc::channel();
+    let ingest_tx = poll_tx.clone();
     let (control_tx, control_rx) = mpsc::channel::<poller::Control>();
     let ingest = ingest::Ingest {
         store,
@@ -189,6 +191,7 @@ fn main() -> Result<()> {
         live,
         db_path,
         control: control_tx.clone(),
+        ingest: ingest_tx,
     });
     let served = runtime.block_on(async {
         axum::serve(listener, app)
@@ -205,7 +208,9 @@ fn main() -> Result<()> {
     // Stop the poller; the ingest thread then drains, records "stopped" and exits.
     let _ = control_tx.send(poller::Control::Stop);
     let _ = poller.join();
-    let _ = ingest.join();
+    // Stop API tasks first: open WebSocket sessions hold senders to the
+    // ingest thread, which only finishes once every sender is gone.
     runtime.shutdown_timeout(Duration::from_secs(2));
+    let _ = ingest.join();
     Ok(())
 }

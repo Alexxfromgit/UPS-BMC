@@ -1,7 +1,7 @@
 // UPS-BMC desktop UI. All values are prepared in Rust (src/view.rs); this
 // file is layout and styling only.
 
-import { Button, AboutSlint, ScrollView, Switch, TabWidget, StandardTableView, ComboBox } from "std-widgets.slint";
+import { Button, AboutSlint, ScrollView, Switch, TabWidget, StandardTableView, ComboBox, LineEdit } from "std-widgets.slint";
 
 export struct StatCardData {
     title: string,
@@ -307,6 +307,8 @@ export component AppWindow inherits Window {
     in property <string> settings-message;
     callback set-beeper(bool);
     callback set-autostart(bool);
+    in property <string> assumed-load-text: "not set";
+    callback set-assumed-load(string);
 
     settings-popup := PopupWindow {
         close-policy: PopupClosePolicy.close-on-click-outside;
@@ -353,6 +355,34 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+                VerticalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "Estimated load of your equipment";
+                        color: Theme.text;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "Small loads (a router, a laptop charger) are below what the UPS can measure, so it reports 0 %. Enter the typical draw in watts. It is shown as an estimate and used for outage energy. Leave empty to clear. Currently: " + root.assumed-load-text + ".";
+                        color: Theme.muted;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        assumed-input := LineEdit {
+                            placeholder-text: "e.g. 20";
+                            input-type: decimal;
+                        }
+                        Button {
+                            text: "Save";
+                            clicked => {
+                                root.set-assumed-load(assumed-input.text);
+                            }
+                        }
+                    }
+                }
+
                 if root.autostart-available: HorizontalLayout {
                     spacing: 12px;
                     VerticalLayout {
@@ -725,7 +755,7 @@ export component AppWindow inherits Window {
                     vertical-stretch: 1;
                     columns: [
                         { title: "Started", min-width: 180px }, { title: "Duration" }, { title: "Battery" },
-                        { title: "Lowest" }, { title: "UPS estimate" }, { title: "Avg load" },
+                        { title: "Lowest" }, { title: "Battery V" }, { title: "UPS estimate" }, { title: "Avg load" },
                         { title: "Energy" }, { title: "Recharge" }, { title: "Notes" },
                     ];
                     rows: root.outage-rows;

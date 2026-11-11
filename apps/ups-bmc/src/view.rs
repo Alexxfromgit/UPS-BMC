@@ -53,6 +53,8 @@ pub struct View {
     pub beeper_available: bool,
     pub beeper_on: bool,
     pub beeper_text: String,
+    /// Current load estimate for the Settings dialog ("20 W" or "not set").
+    pub assumed_load_text: String,
 }
 
 /// One row of the events list.
@@ -180,7 +182,21 @@ pub fn build(status: &StatusResponse, history: &[HistoryPoint], now: DateTime<Ut
         (Some(w), None, _) => format!("{w:.0} W"),
         _ => String::new(),
     };
-
+    // The 5E reports load in ~1 % (9 VA) steps and reads 0 for small loads
+    // (a router, a laptop charger). Don't present that as "0 %".
+    let below_range = load.is_some_and(|l| l < 0.5) && watts.is_none_or(|w| w < 0.5);
+    let (load_text, load_detail) = match (below_range, status.assumed_load_w) {
+        (true, Some(a)) => (
+            format!("≈ {a:.0} W"),
+            "your estimate · the UPS reads 0 % (below its measuring range)".to_owned(),
+        ),
+        (true, None) => (
+            "Below range".to_owned(),
+            "The UPS reads 0 %: the load is too small for it to measure. You can enter an estimate in Settings."
+                .to_owned(),
+        ),
+        (false, _) => (fmt_opt(load, "%", 0), load_detail),
+    };
     let on_battery = flags.is_some_and(UpsStatus::on_battery);
     let input = s.and_then(|s| s.input_voltage_v);
     let input_detail = if on_battery {
@@ -250,7 +266,7 @@ pub fn build(status: &StatusResponse, history: &[HistoryPoint], now: DateTime<Ut
         charge_arc: charge.map(arc_path).unwrap_or_default(),
         charge_text,
         runtime_text: runtime_s.map_or_else(|| DASH.to_owned(), runtime),
-        load_text: fmt_opt(load, "%", 0),
+        load_text,
         load_detail,
         input_text: fmt_opt(input, "V", 0),
         input_detail,
@@ -276,6 +292,9 @@ pub fn build(status: &StatusResponse, history: &[HistoryPoint], now: DateTime<Ut
         beeper_available: can_set_beeper && beeper_status.is_some(),
         beeper_on: beeper_status == Some("enabled"),
         beeper_text,
+        assumed_load_text: status
+            .assumed_load_w
+            .map_or_else(|| "not set".to_owned(), |w| format!("{w:.0} W")),
     }
 }
 
@@ -522,6 +541,7 @@ mod tests {
             started_at: now() - Duration::hours(1),
             connection: Connection::Connected,
             capabilities: vec!["beeper".into()],
+            assumed_load_w: None,
             device: Some(DeviceInfo {
                 source: "hid".into(),
                 manufacturer: Some("EATON".into()),
@@ -568,6 +588,30 @@ mod tests {
         assert_eq!(v.beeper_text, "The UPS reports: enabled");
         st.capabilities.clear();
         assert!(!build(&st, &[], now()).beeper_available);
+    }
+
+    #[test]
+    fn explains_loads_below_the_measuring_range() {
+        let mut st = status(UpsStatus::OB | UpsStatus::DISCHRG, 100.0);
+        {
+            let s = st.snapshot.as_mut().unwrap();
+            s.load_pct = Some(0.0);
+            s.realpower_w = Some(0.0);
+        }
+        let v = build(&st, &[], now());
+        assert_eq!(v.load_text, "Below range");
+        assert!(v.load_detail.contains("too small for it to measure"));
+        assert_eq!(v.assumed_load_text, "not set");
+
+        st.assumed_load_w = Some(20.0);
+        let v = build(&st, &[], now());
+        assert_eq!(v.load_text, "≈ 20 W");
+        assert!(v.load_detail.starts_with("your estimate"));
+        assert_eq!(v.assumed_load_text, "20 W");
+
+        // A measurable load is shown as measured, estimate or not.
+        st.snapshot.as_mut().unwrap().load_pct = Some(12.0);
+        assert_eq!(build(&st, &[], now()).load_text, "12 %");
     }
 
     #[test]
@@ -697,11 +741,12 @@ pub struct OutagesView {
 
 /// Column titles of the outage table (must match `ui/app.slint`).
 #[cfg(test)]
-const OUTAGE_COLUMNS: [&str; 9] = [
+const OUTAGE_COLUMNS: [&str; 10] = [
     "Started",
     "Duration",
     "Battery",
     "Lowest",
+    "Battery V",
     "UPS estimate",
     "Avg load",
     "Energy",
@@ -718,6 +763,7 @@ fn secs(d: chrono::Duration) -> f64 {
 }
 
 /// Builds the Outages/Reports view (pure).
+#[allow(clippy::too_many_lines)] // one flat mapping per table column
 pub fn outages_view(
     outages: &[ups_api::Outage],
     stats: Option<&ups_api::StatsResponse>,
@@ -776,15 +822,26 @@ pub fn outages_view(
                     _ => dash(),
                 },
                 o.charge_min_pct.map_or_else(dash, |c| format!("{c:.0} %")),
+                match (o.battery_v_start, o.battery_v_min) {
+                    (Some(a), Some(m)) => format!("{a:.1} → {m:.1} V"),
+                    _ => dash(),
+                },
                 o.runtime_estimate_start_s
                     .map_or_else(dash, |r| format::duration(f64::from(r))),
                 match (o.avg_power_w, o.avg_load_pct) {
+                    (Some(w), _) if o.power_estimated => format!("≈ {w:.0} W (estimate)"),
                     (Some(w), Some(l)) => format!("{w:.0} W ({l:.0} %)"),
                     (Some(w), None) => format!("{w:.0} W"),
                     (None, Some(l)) => format!("{l:.0} %"),
                     (None, None) => dash(),
                 },
-                o.energy_wh.map_or_else(dash, |e| format!("{e:.1} Wh")),
+                o.energy_wh.map_or_else(dash, |e| {
+                    if o.power_estimated {
+                        format!("≈ {e:.1} Wh")
+                    } else {
+                        format!("{e:.1} Wh")
+                    }
+                }),
                 match (o.recharge_duration(), o.end) {
                     (Some(d), _) => format::duration(secs(d)),
                     // Newest first: only the newest outage can still be recharging.
@@ -840,6 +897,8 @@ mod outage_tests {
         done.avg_power_w = Some(96.0);
         done.avg_load_pct = Some(20.0);
         done.energy_wh = Some(19.2);
+        done.battery_v_start = Some(13.6);
+        done.battery_v_min = Some(12.4);
         done.recharged_at = Some(done.start + Duration::minutes(80));
         let mut ongoing = Outage::started(now - Duration::seconds(90));
         ongoing.id = 2;
@@ -865,10 +924,11 @@ mod outage_tests {
         assert_eq!(v.cards[0].outages, "2 outages");
         assert_eq!(v.cards[0].availability, "Mains availability: 98.1 %");
         assert_eq!(v.rows[0][1], "ongoing · 1 min 30 s");
-        assert_eq!(v.rows[0][8], "start not observed");
+        assert_eq!(v.rows[0][9], "start not observed");
         assert_eq!(v.rows[1][2], "100 → 81 %");
-        assert_eq!(v.rows[1][5], "96 W (20 %)");
-        assert_eq!(v.rows[1][7], "1 h 08 min");
+        assert_eq!(v.rows[1][6], "96 W (20 %)");
+        assert_eq!(v.rows[1][4], "13.6 → 12.4 V");
+        assert_eq!(v.rows[1][8], "1 h 08 min");
         assert_eq!(v.rows[1].len(), OUTAGE_COLUMNS.len());
         assert_eq!(v.month_labels, ["November 2026"]);
         assert!(v.summary.starts_with("2 outages"));

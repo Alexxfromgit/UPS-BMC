@@ -176,15 +176,28 @@ fn live(
     }
 }
 
-/// Asks the collector to switch the UPS beeper (ADR-0003). Returns the
-/// collector's message, or the error text it sent back.
+/// Asks the collector to switch the UPS beeper (ADR-0003).
 pub fn set_beeper(address: &str, enabled: bool) -> Result<String, String> {
-    let mut response = ureq::post(format!("http://{address}/api/v1/settings/beeper"))
+    post_setting(address, "beeper", &ups_api::BeeperRequest { enabled })
+}
+
+/// Sets or clears the load estimate used when the UPS reads 0 %.
+pub fn set_assumed_load(address: &str, watts: Option<f32>) -> Result<String, String> {
+    post_setting(
+        address,
+        "assumed-load",
+        &ups_api::AssumedLoadRequest { watts },
+    )
+}
+
+/// POSTs a setting; returns the collector's message or its error text.
+fn post_setting(address: &str, name: &str, body: &impl serde::Serialize) -> Result<String, String> {
+    let mut response = ureq::post(format!("http://{address}/api/v1/settings/{name}"))
         .config()
         .timeout_global(Some(Duration::from_secs(15)))
         .http_status_as_error(false)
         .build()
-        .send_json(ups_api::BeeperRequest { enabled })
+        .send_json(body)
         .map_err(|e| e.to_string())?;
     let ok = response.status().is_success();
     let body = response.body_mut().read_to_string().unwrap_or_default();

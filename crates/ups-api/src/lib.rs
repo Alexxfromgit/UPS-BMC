@@ -7,6 +7,7 @@
 //! | GET | `/api/v1/events?limit=50` | [`EventsResponse`] |
 //! | GET (WebSocket) | `/api/v1/live` | stream of [`LiveMessage`] (JSON text frames) |
 //! | POST | `/api/v1/settings/beeper` with [`BeeperRequest`] | [`SettingResponse`] |
+//! | POST | `/api/v1/settings/assumed-load` with [`AssumedLoadRequest`] | [`SettingResponse`] |
 //! | GET | `/api/v1/outages?days=90&limit=500` | [`OutagesResponse`] |
 //! | GET | `/api/v1/stats` | [`StatsResponse`] |
 //! | GET | `/api/v1/report?month=2026-11&format=html` (or `csv`) | report document |
@@ -50,6 +51,10 @@ pub struct StatusResponse {
     /// Settings the connected UPS lets UPS-BMC change (e.g. `beeper`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// The user's estimate of the protected load, used when the UPS reports
+    /// 0 (below its measuring range).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumed_load_w: Option<f32>,
     /// Latest reading. Stale when `connection` is not `Connected`.
     pub snapshot: Option<Snapshot>,
 }
@@ -88,6 +93,12 @@ pub struct BeeperRequest {
     pub enabled: bool,
 }
 
+/// Body of `POST /api/v1/settings/assumed-load`: watts (1–2000), or null to clear.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AssumedLoadRequest {
+    pub watts: Option<f32>,
+}
+
 /// Result of a setting change. Errors use HTTP status codes with a text body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingResponse {
@@ -122,6 +133,7 @@ mod tests {
             },
             device: None,
             capabilities: Vec::new(),
+            assumed_load_w: None,
             snapshot: None,
         };
         let json = serde_json::to_string(&LiveMessage::Status(Box::new(status.clone()))).unwrap();

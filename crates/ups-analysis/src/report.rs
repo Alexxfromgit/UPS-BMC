@@ -210,11 +210,12 @@ where
     if month_list.is_empty() {
         h.push_str("<p>No outages recorded this month.</p>\n");
     } else {
-        h.push_str("<table>\n<tr><th>#</th><th>Start</th><th>End</th><th class=\"num\">Duration</th><th class=\"num\">Battery</th><th class=\"num\">Lowest</th><th class=\"num\">UPS estimate at start</th><th class=\"num\">Avg load</th><th class=\"num\">Energy</th><th class=\"num\">Recharge</th><th>Notes</th></tr>\n");
+        h.push_str("<table>\n<tr><th>#</th><th>Start</th><th>End</th><th class=\"num\">Duration</th><th class=\"num\">Battery</th><th class=\"num\">Lowest</th><th class=\"num\">Battery V</th><th class=\"num\">UPS estimate at start</th><th class=\"num\">Avg load</th><th class=\"num\">Energy</th><th class=\"num\">Recharge</th><th>Notes</th></tr>\n");
         for (i, o) in month_list.iter().enumerate() {
+            let approx = if o.power_estimated { "≈ " } else { "" };
             let _ = writeln!(
                 h,
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td></tr>",
                 i + 1,
                 local(o.start, tz),
                 opt(o.end, |e| local(e, tz)),
@@ -224,16 +225,24 @@ where
                     _ => "—".into(),
                 },
                 opt(o.charge_min_pct, |c| format!("{c:.0} %")),
+                match (o.battery_v_start, o.battery_v_min) {
+                    (Some(a), Some(m)) => format!("{a:.1} → {m:.1} V"),
+                    _ => "—".into(),
+                },
                 opt(o.runtime_estimate_start_s, |r| format::duration(f64::from(
                     r
                 ))),
-                opt(o.avg_power_w, |w| format!(
-                    "{w:.0} W{}",
-                    o.avg_load_pct
-                        .map(|l| format!(" ({l:.0} %)"))
-                        .unwrap_or_default()
-                )),
-                opt(o.energy_wh, |e| format!("{e:.1} Wh")),
+                opt(o.avg_power_w, |w| if o.power_estimated {
+                    format!("≈ {w:.0} W (estimate)")
+                } else {
+                    format!(
+                        "{w:.0} W{}",
+                        o.avg_load_pct
+                            .map(|l| format!(" ({l:.0} %)"))
+                            .unwrap_or_default()
+                    )
+                }),
+                opt(o.energy_wh, |e| format!("{approx}{e:.1} Wh")),
                 opt(o.recharge_duration(), |d| format::duration(secs(d))),
                 esc(&notes(o)),
             );
@@ -270,7 +279,8 @@ where
     let (first, last) = month_range(year, month)?;
     let mut out = String::from(
         "start,end,duration_s,start_observed,end_observed,charge_start_pct,charge_end_pct,\
-         charge_min_pct,ups_runtime_estimate_s,avg_load_pct,avg_power_w,energy_wh,recharge_s,notes\r\n",
+         charge_min_pct,ups_runtime_estimate_s,avg_load_pct,avg_power_w,energy_wh,recharge_s,\
+         battery_v_start,battery_v_end,battery_v_min,power_estimated,notes\r\n",
     );
     let num = |v: Option<f64>| v.map(|v| format!("{v:.1}")).unwrap_or_default();
     for o in month_outages(outages, first, last, tz) {
@@ -292,6 +302,10 @@ where
             o.recharge_duration()
                 .map(|d| format!("{:.0}", secs(d)))
                 .unwrap_or_default(),
+            num(o.battery_v_start.map(f64::from)),
+            num(o.battery_v_end.map(f64::from)),
+            num(o.battery_v_min.map(f64::from)),
+            o.power_estimated.to_string(),
             notes(o),
         ];
         let line: Vec<String> = row.iter().map(|f| csv_field(f)).collect();
@@ -325,6 +339,8 @@ mod tests {
         a.avg_power_w = Some(96.0);
         a.energy_wh = Some(19.2);
         a.recharged_at = Some(start + Duration::minutes(80));
+        a.battery_v_start = Some(13.4);
+        a.battery_v_min = Some(12.3);
         let mut b = Outage::started(start + Duration::hours(30));
         b.end = Some(start + Duration::hours(31));
         b.end_latest = Some(start + Duration::hours(33));
@@ -369,6 +385,7 @@ mod tests {
         );
         assert!(html.contains("<b>2</b>"), "two outages started in November");
         assert!(html.contains("100 → 81 %"));
+        assert!(html.contains("13.4 → 12.3 V"));
         assert!(html.contains("end not observed (monitoring gap)"));
         assert!(!html.contains("2026-10-30"), "October outage excluded");
         assert!(html.contains("99.2 %"), "daily availability of the 10th");

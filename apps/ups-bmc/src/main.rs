@@ -89,6 +89,7 @@ fn apply_view(w: &AppWindow, tray: &Tray, v: &View) {
     w.set_footer_text(s(&v.footer_text));
     w.set_beeper_available(v.beeper_available);
     w.set_beeper_text(s(&v.beeper_text));
+    w.set_assumed_load_text(s(&v.assumed_load_text));
     // Don't fight the switch while a change is being applied.
     if !w.get_beeper_busy() {
         w.set_beeper_on(v.beeper_on);
@@ -275,6 +276,42 @@ fn wire_settings(window: &AppWindow, collector: &str) {
                 w.set_settings_message(format!("Could not change autostart: {e}").into());
             }
         }
+    });
+
+    let w = window.as_weak();
+    let address = collector.to_owned();
+    window.on_set_assumed_load(move |text| {
+        let text = text.trim().replace(',', ".");
+        let watts = if text.is_empty() {
+            None
+        } else {
+            match text.parse::<f32>() {
+                Ok(v) if (1.0..=2000.0).contains(&v) => Some(v),
+                _ => {
+                    if let Some(win) = w.upgrade() {
+                        win.set_settings_message(
+                            "Enter a number of watts between 1 and 2000.".into(),
+                        );
+                    }
+                    return;
+                }
+            }
+        };
+        let (w, address) = (w.clone(), address.clone());
+        std::thread::spawn(move || {
+            let result = client::set_assumed_load(&address, watts);
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = w.upgrade() {
+                    w.set_settings_message(
+                        match result {
+                            Ok(m) => m,
+                            Err(e) => format!("Estimate not saved: {e}"),
+                        }
+                        .into(),
+                    );
+                }
+            });
+        });
     });
 
     let w = window.as_weak();

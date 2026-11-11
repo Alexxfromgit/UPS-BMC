@@ -67,6 +67,9 @@ pub struct OutageTracker {
     recharging: Option<Outage>,
     /// Time and on-battery state of the previous snapshot.
     last: Option<(DateTime<Utc>, bool)>,
+    /// The user's estimate of the protected load, used when the UPS reports
+    /// no measurable power (0 W / 0 %).
+    assumed_power_w: Option<f32>,
 }
 
 impl OutageTracker {
@@ -77,6 +80,7 @@ impl OutageTracker {
             open: None,
             recharging: None,
             last: None,
+            assumed_power_w: None,
         }
     }
 
@@ -105,6 +109,11 @@ impl OutageTracker {
         } else if let Some(o) = self.recharging.as_mut().filter(|o| o.id == 0) {
             o.id = id;
         }
+    }
+
+    /// Sets (or clears) the assumed load used when the UPS measures 0.
+    pub fn set_assumed_power(&mut self, watts: Option<f32>) {
+        self.assumed_power_w = watts.filter(|w| *w > 0.0);
     }
 
     /// The ongoing outage, if any.
@@ -143,7 +152,7 @@ impl OutageTracker {
                 Duration::zero()
             };
             if let Some((o, sums)) = self.open.as_mut() {
-                accumulate(o, sums, s, step);
+                accumulate(o, sums, s, step, self.assumed_power_w);
                 changed.push(o.clone());
             }
         } else {
@@ -196,7 +205,12 @@ impl OutageTracker {
 }
 
 #[allow(clippy::cast_precision_loss)] // step is at most a few seconds
-fn accumulate(o: &mut Outage, sums: &mut Sums, s: &Snapshot, step: Duration) {
+fn accumulate(o: &mut Outage, sums: &mut Sums, s: &Snapshot, step: Duration, assumed: Option<f32>) {
+    if let Some(v) = s.battery_voltage_v {
+        o.battery_v_start.get_or_insert(v);
+        o.battery_v_end = Some(v);
+        o.battery_v_min = Some(o.battery_v_min.map_or(v, |m| m.min(v)));
+    }
     if let Some(c) = s.battery_charge_pct {
         o.charge_start_pct.get_or_insert(c);
         o.charge_end_pct = Some(c);
@@ -209,7 +223,18 @@ fn accumulate(o: &mut Outage, sums: &mut Sums, s: &Snapshot, step: Duration) {
         sums.load += f64::from(l);
         sums.load_n += 1;
     }
-    if let Some(w) = s.realpower_w.or_else(|| s.estimated_load_w()) {
+    // Measured power, unless the UPS reads 0 (below its measuring range) and
+    // the user gave an estimate.
+    let measured = s.realpower_w.or_else(|| s.estimated_load_w());
+    let power = match (measured, assumed) {
+        (Some(w), _) if w > 0.0 => Some(w),
+        (_, Some(a)) => {
+            o.power_estimated = true;
+            Some(a)
+        }
+        (m, None) => m,
+    };
+    if let Some(w) = power {
         sums.power += f64::from(w);
         sums.power_n += 1;
         sums.energy_wh += f64::from(w) * step.num_milliseconds() as f64 / 3_600_000.0;
@@ -373,5 +398,64 @@ mod tests {
         assert_eq!(tr.feed(&snap(5, true, 90.0)).len(), 1);
         assert_eq!(tr.feed(&snap(4, false, 90.0)), Vec::<Outage>::new());
         assert!(tr.current().is_some());
+    }
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use chrono::TimeZone;
+    use ups_model::UpsStatus;
+
+    use super::*;
+
+    fn snap(secs: i64, on_battery: bool, volts: f32) -> Snapshot {
+        let mut s = Snapshot::empty(
+            Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap() + Duration::seconds(secs),
+        );
+        s.status = Some(if on_battery {
+            UpsStatus::OB
+        } else {
+            UpsStatus::OL
+        });
+        s.battery_voltage_v = Some(volts);
+        s.load_pct = Some(0.0);
+        s.realpower_w = Some(0.0); // below the UPS's measuring range
+        s
+    }
+
+    #[test]
+    fn records_battery_voltage_and_uses_the_assumed_load() {
+        let mut tr = OutageTracker::new(TrackerConfig::default());
+        tr.set_assumed_power(Some(20.0));
+        tr.feed(&snap(0, false, 13.6));
+        let mut last = Vec::new();
+        for (i, v) in [(1, 12.9), (2, 12.7), (3, 12.6), (4, 12.5)] {
+            last = tr.feed(&snap(i, true, v));
+        }
+        let o = &last[0];
+        assert_eq!(o.battery_v_start, Some(12.9));
+        assert_eq!(o.battery_v_end, Some(12.5));
+        assert_eq!(o.battery_v_min, Some(12.5));
+        assert!(o.power_estimated);
+        assert_eq!(o.avg_power_w, Some(20.0));
+        // 3 one-second steps at 20 W.
+        assert!((o.energy_wh.unwrap() - 60.0 / 3600.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn measured_power_wins_over_the_estimate() {
+        let mut tr = OutageTracker::new(TrackerConfig::default());
+        tr.set_assumed_power(Some(20.0));
+        let mut s = snap(0, true, 12.9);
+        s.realpower_w = Some(55.0);
+        let o = &tr.feed(&s)[0];
+        assert!(!o.power_estimated);
+        assert_eq!(o.avg_power_w, Some(55.0));
+
+        // Without an estimate, a 0 W reading stays 0 W (not estimated).
+        let mut plain = OutageTracker::new(TrackerConfig::default());
+        let o = &plain.feed(&snap(0, true, 12.9))[0];
+        assert!(!o.power_estimated);
+        assert_eq!(o.avg_power_w, Some(0.0));
     }
 }

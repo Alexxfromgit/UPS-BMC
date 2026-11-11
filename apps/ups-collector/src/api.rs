@@ -14,8 +14,8 @@ use serde::Deserialize;
 use tokio::sync::broadcast;
 use tracing::debug;
 use ups_api::{
-    BeeperRequest, EventsResponse, HistoryResponse, LiveMessage, OutagesResponse, SettingResponse,
-    StatsResponse, StatusResponse,
+    AssumedLoadRequest, BeeperRequest, EventsResponse, HistoryResponse, LiveMessage,
+    OutagesResponse, SettingResponse, StatsResponse, StatusResponse,
 };
 use ups_source::Setting;
 
@@ -32,6 +32,8 @@ pub struct AppState {
     pub db_path: PathBuf,
     /// Requests to the poller thread (setting changes).
     pub control: std::sync::mpsc::Sender<Control>,
+    /// Requests to the ingest thread (load estimate).
+    pub ingest: std::sync::mpsc::Sender<crate::poller::PollerMsg>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -45,6 +47,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/events", get(events))
         .route("/api/v1/live", get(live))
         .route("/api/v1/settings/beeper", post(set_beeper))
+        .route("/api/v1/settings/assumed-load", post(set_assumed_load))
         .route("/api/v1/outages", get(outages))
         .route("/api/v1/stats", get(stats))
         .route("/api/v1/report", get(report))
@@ -306,4 +309,45 @@ async fn report(
         body,
     )
         .into_response())
+}
+
+/// `POST /api/v1/settings/assumed-load` with `{"watts": 20}` or `{"watts": null}`.
+async fn set_assumed_load(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<AssumedLoadRequest>,
+) -> Result<Json<SettingResponse>, ApiError> {
+    reject_browsers(&headers)?;
+    if let Some(w) = req.watts
+        && !(1.0..=2000.0).contains(&w)
+    {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "watts must be between 1 and 2000".into(),
+        ));
+    }
+    let unavailable = || {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the collector is shutting down".to_owned(),
+        )
+    };
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    state
+        .ingest
+        .send(crate::poller::PollerMsg::SetAssumedLoad {
+            watts: req.watts,
+            reply,
+        })
+        .map_err(|_| unavailable())?;
+    rx.await
+        .map_err(|_| unavailable())?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(SettingResponse {
+        ok: true,
+        message: match req.watts {
+            Some(w) => format!("Load estimate set to {w:.0} W"),
+            None => "Load estimate cleared".into(),
+        },
+    }))
 }

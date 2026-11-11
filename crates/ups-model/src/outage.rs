@@ -37,6 +37,18 @@ pub struct Outage {
     pub avg_load_pct: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avg_power_w: Option<f32>,
+    /// Battery voltage at the first sample on battery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_v_start: Option<f32>,
+    /// Battery voltage at the last sample on battery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_v_end: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_v_min: Option<f32>,
+    /// True when power and energy figures use the user's load estimate
+    /// because the UPS reported 0 (below its measuring range).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub power_estimated: bool,
     /// Energy delivered from the battery (integrated output power).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub energy_wh: Option<f32>,
@@ -61,6 +73,10 @@ impl Outage {
             runtime_estimate_start_s: None,
             avg_load_pct: None,
             avg_power_w: None,
+            battery_v_start: None,
+            battery_v_end: None,
+            battery_v_min: None,
+            power_estimated: false,
             energy_wh: None,
             recharged_at: None,
         }
