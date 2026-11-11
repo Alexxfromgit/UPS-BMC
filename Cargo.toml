@@ -1,19 +1,41 @@
 [workspace]
 resolver = "3"
-members = ["crates/ups-model", "crates/ups-hid", "apps/hid-probe"]
+members = [
+    "crates/ups-model",
+    "crates/ups-hid",
+    "crates/ups-source",
+    "crates/ups-store",
+    "crates/ups-api",
+    "apps/hid-probe",
+    "apps/ups-collector",
+    "apps/ups-bmc",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.92"
 authors = ["UPS-BMC contributors"]
 publish = false
 
 [workspace.dependencies]
 ups-model = { path = "crates/ups-model" }
 ups-hid = { path = "crates/ups-hid" }
+ups-source = { path = "crates/ups-source" }
+ups-store = { path = "crates/ups-store" }
+ups-api = { path = "crates/ups-api" }
 
 anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+directories = "6"
+notify-rust = "4"
+rusqlite = { version = "0.42", features = ["bundled"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tungstenite = "0.30"
+# Plain HTTP to the local collector only: no TLS stack.
+ureq = { version = "3", default-features = false, features = ["json"] }
 bitflags = "2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
@@ -21,10 +43,16 @@ hidapi = "2.6"
 proptest = { version = "1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+slint = "1.18"
+slint-build = "1.18"
+winresource = "0.1"
 thiserror = "2"
+tracing = "0.1"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# deny (not forbid): Slint's generated code carries its own #[allow(unsafe_code)].
+# Our code still can't use unsafe without an explicit, reviewable allow.
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]

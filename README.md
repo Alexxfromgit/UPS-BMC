@@ -3,8 +3,9 @@
 Monitoring, outage analysis and battery-health estimation for home UPS units.
 Built in Rust and Slint. The reference device is the Eaton 5E Gen2 900VA USB (5E900UD).
 
-> **Read-only by design.** UPS-BMC never sends commands to the UPS (see
-> [ADR-0001](docs/adr/0001-data-source.md)). Shutdown protection is handled by
+> **Read-only by design.** UPS-BMC sends nothing to the UPS except the settings
+> you change on purpose in **Settings**. Today that is only the beeper
+> ([ADR-0001](docs/adr/0001-data-source.md), [ADR-0003](docs/adr/0003-ups-configuration-writes.md)). Shutdown protection is handled by
 > Windows Power Options (or by NUT on the Pi), not by this app.
 
 ## Before you start: enable shutdown protection
@@ -23,11 +24,11 @@ This protects the PC whether or not UPS-BMC is running.
 | Milestone | Scope | Status |
 |-----------|-------|--------|
 | M0 | Workspace, CI, ADRs, `hid-probe`, real-device capture | done |
-| M1 = V1 | Collector + SQLite + API, Slint dashboard, tray, toasts | planned |
+| M1 = V1 | Collector + SQLite + API, Slint dashboard, tray, toasts | done (incl. beeper setting, autostart, installer) |
 | M2 = V2 | Outage engine, outage history, monthly report (HTML/CSV) | planned |
 | M3 = V3 | Load-normalised battery degradation estimate, guided runtime test | planned |
 | M4 = V4 | NUT source, remote collector (Raspberry Pi, or NUT via Entware on a Keenetic router if it proves reliable), remote UI, ntfy/Telegram/email | planned |
-| M5 | Controlled UPS settings: beeper, output voltage, thresholds ([ADR-0003](docs/adr/0003-ups-configuration-writes.md)) | proposed |
+| M5 | More UPS settings: output voltage, thresholds (beeper already done in M1) ([ADR-0003](docs/adr/0003-ups-configuration-writes.md)) | proposed |
 
 **Polling:** each feature report takes about 44 ms on the 5E (USB control
 transfer plus UPS firmware). The collector reads the 5 live reports (status,
@@ -35,26 +36,76 @@ charge/runtime, load/battery voltage, input/output, boost/buck) every
 **1 s**, which takes about 220 ms. Static reports (ratings, strings,
 configuration) are read every 60 s.
 
+## Installing
+```bash
+.\installer\build.ps1
+```
+This builds `target\installer\UPS-BMC-setup-<version>.exe`, which needs
+Inno Setup 6. The installer is per-user, so it needs no administrator rights,
+and installs to `%LOCALAPPDATA%\Programs\UPS-BMC`. It adds a Start Menu entry,
+which also makes Windows notifications show "UPS-BMC" as the sender. It can
+optionally **start UPS-BMC at sign-in**, which you can also change later under
+Settings → Start with Windows. Uninstalling keeps your database and logs.
+
+## Running UPS-BMC
+From a development checkout:
+```bash
+cargo build --release -p ups-collector -p ups-bmc
+```
+```bash
+.\target\release\ups-bmc.exe
+```
+- **`ups-bmc`** is the desktop dashboard. If the collector isn't running, it
+  starts it in the background. Closing the window keeps UPS-BMC in the
+  notification area; use **Quit** in the tray menu to exit the UI.
+- **`ups-collector`** keeps running after the UI exits, so it records data and
+  outages around the clock. It polls the UPS every second, stores samples
+  (kept 30 days) and events (kept forever) in
+  `%LOCALAPPDATA%\UPS-BMC\data\ups-bmc.sqlite`, and serves the local API on
+  `127.0.0.1:47800`. Its logs are in `%LOCALAPPDATA%\UPS-BMC\data\logs`.
+- **Simulated UPS:** without the hardware, try `ups-bmc --sim`. Make sure no
+  collector is running yet. The simulator has a power outage every 5 minutes.
+- **Collector options:** `ups-collector --help` lists them (source, polling
+  interval, database path, retention).
+- **Settings** (top right of the window):
+  - **UPS beeper:** on/off. The change is verified by reading it back from the UPS.
+  - **Start with Windows:** turns autostart at sign-in on or off.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/status` | connection, device, latest reading |
+| `GET /api/v1/history?minutes=15&points=300` | averaged history |
+| `GET /api/v1/events?limit=50` | recent events, newest first |
+| `WS /api/v1/live` | status every poll plus events as they happen |
+| `POST /api/v1/settings/beeper` | `{"enabled": true}`: switch the UPS beeper (verified, logged) |
+
 ## Workspace layout
 ```
-crates/ups-model   source-independent domain model (NUT names on the wire, status flags, snapshots)
-crates/ups-hid     defensive HID report-descriptor parser + Power Device / Battery System usage tables
-apps/hid-probe     read-only discovery tool for HID UPS devices
-docs/adr           architecture decision records
-docs/reviews       code review records and their resolution
-fixtures           curated real-device captures for tests
+crates/ups-model     source-independent domain model (NUT names on the wire, status flags, snapshots, events)
+crates/ups-hid       defensive HID report-descriptor parser + Power Device / Battery System usage tables
+crates/ups-source    telemetry sources: HID (read-only, HID → NUT mapping), simulator
+crates/ups-store     SQLite storage (samples, events, device), WAL, retention
+crates/ups-api       collector API wire types (v1)
+apps/ups-collector   headless collector: poller → ingest/events → SQLite, HTTP + WebSocket API
+apps/ups-bmc         Slint desktop UI: dashboard, charts, events, tray icon, notifications
+apps/hid-probe       read-only discovery tool for HID UPS devices
+docs/adr             architecture decision records
+docs/reviews         code review records and their resolution
+fixtures             curated real-device captures for tests
 ```
-Planned: `ups-source`, `ups-store`, `ups-analysis`, `ups-api`, `apps/ups-collector`, `apps/ups-bmc`.
+
+UPS-BMC uses [Slint](https://slint.dev) under the Slint Royalty-free Desktop
+License 2.0. The required attribution is in the About dialog.
 
 ## Development
 **Toolchain:** Rust 1.99, pinned in `rust-toolchain.toml` (rustup installs it
-automatically). The MSRV is 1.88.
+automatically). The MSRV is 1.92 (required by Slint 1.18).
 
 **Windows:** Visual Studio C++ build tools (MSVC).
 
 **Linux / Raspberry Pi:**
 ```bash
-sudo apt-get install -y libudev-dev pkg-config
+sudo apt-get install -y libudev-dev pkg-config libfontconfig1-dev libxkbcommon-dev
 ```
 To probe without root, allow access to HID devices with a udev rule. For the
 Eaton vendor ID 0463:

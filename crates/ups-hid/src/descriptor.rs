@@ -165,6 +165,41 @@ impl Field {
         Some(value)
     }
 
+    /// Writes `value` into this field's bits of `data` (report payload
+    /// without the report ID byte), leaving all other bits untouched.
+    ///
+    /// Returns `false`, without changing anything, if the value is outside
+    /// the logical range, the field is wider than 32 bits or `data` is too short.
+    #[must_use]
+    pub fn insert(&self, data: &mut [u8], value: i64) -> bool {
+        if self.bit_size == 0
+            || self.bit_size > 32
+            || value < self.logical_min
+            || value > self.logical_max
+        {
+            return false;
+        }
+        let Some(end) = self.bit_offset.checked_add(self.bit_size) else {
+            return false;
+        };
+        if usize::try_from(end.div_ceil(8)).map_or(true, |len| len > data.len()) {
+            return false;
+        }
+        // Two's complement in `bit_size` bits (masking handles negatives).
+        let bits = value.cast_unsigned() & ((1u64 << self.bit_size) - 1);
+        for b in 0..self.bit_size {
+            let bit = self.bit_offset + b;
+            let byte = &mut data[(bit / 8) as usize];
+            let mask = 1u8 << (bit % 8);
+            if (bits >> b) & 1 == 1 {
+                *byte |= mask;
+            } else {
+                *byte &= !mask;
+            }
+        }
+        true
+    }
+
     /// Maps a logical value onto the physical range when the descriptor
     /// declares one. The unit exponent is deliberately *not* applied.
     #[must_use]

@@ -1,9 +1,10 @@
-# UPS-BMC is strictly READ-ONLY towards the UPS until an ADR says otherwise.
+# UPS-BMC is READ-ONLY towards the UPS, except for the allowlisted settings of
+# ADR-0003 (beeper on/off). Those go through crates/ups-source/src/hid/control.rs,
+# the only caller of ReadOnlyHid::send_feature_report (an explicit, reviewed allow).
 # Writing to a UPS (SET_FEATURE / output reports) can change its configuration,
 # start a self-test, toggle the beeper or even schedule a shutdown of the load.
 #
-# Devices may only be opened through `ReadOnlyHid` (apps/hid-probe/src/readonly.rs
-# for now), which exposes read methods only. Raw handles can't be obtained
+# Devices may only be opened through `ReadOnlyHid` (crates/ups-source/src/hid/readonly.rs), which exposes read methods only. Raw handles can't be obtained
 # anywhere else. CI runs clippy with -D warnings, and cargo-deny bans other
 # USB/HID crates (deny.toml), so the guard can't be bypassed through another
 # library.

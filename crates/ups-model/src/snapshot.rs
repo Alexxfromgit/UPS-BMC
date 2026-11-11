@@ -69,6 +69,23 @@ pub struct Snapshot {
         skip_serializing_if = "Option::is_none"
     )]
     pub output_voltage_v: Option<f32>,
+    /// `output.frequency`, hertz.
+    #[serde(
+        rename = "output.frequency",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub output_frequency_hz: Option<f32>,
+    /// `ups.realpower`, watts currently delivered to the load.
+    #[serde(
+        rename = "ups.realpower",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub realpower_w: Option<f32>,
+    /// `ups.power`, volt-amperes currently delivered to the load.
+    #[serde(rename = "ups.power", default, skip_serializing_if = "Option::is_none")]
+    pub power_va: Option<f32>,
     /// `ups.realpower.nominal`, watts.
     #[serde(
         rename = "ups.realpower.nominal",
@@ -102,6 +119,9 @@ impl Snapshot {
             input_voltage_v: None,
             input_frequency_hz: None,
             output_voltage_v: None,
+            output_frequency_hz: None,
+            realpower_w: None,
+            power_va: None,
             realpower_nominal_w: None,
             power_nominal_va: None,
             extra: BTreeMap::new(),

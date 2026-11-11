@@ -42,7 +42,9 @@ opens the device handle for read *and* write.
   well as every hidapi write method. CI runs clippy with `-D warnings`.
 - **cargo-deny:** `deny.toml` bans other USB/HID crates (`rusb`, `nusb`, ...)
   that could bypass the guard.
-- **No FFI:** `unsafe_code = "forbid"` rules out raw FFI calls.
+- **No FFI:** `unsafe_code = "deny"` rules out raw FFI calls. It is `deny`
+  rather than `forbid` only because Slint's generated UI code needs its own
+  `#[allow(unsafe_code)]`. Any `allow` in our code is visible in review.
 - **Limit:** `cargo build` alone doesn't run clippy. CI and code review are the
   gate.
 

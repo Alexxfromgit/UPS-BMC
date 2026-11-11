@@ -17,9 +17,17 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
     "ISC",
+    "MPL-2.0",
     "Unicode-3.0",
+    "Unlicense",
     "Zlib",
+    # Slint (UI toolkit) is used under its Royalty-free Desktop License 2.0,
+    # which requires visible attribution: the AboutSlint badge in the About
+    # dialog (apps/ups-bmc/ui/app.slint). Its GPL-3.0 alternative is not used.
+    "LicenseRef-Slint-Royalty-free-2.0",
 ]
 confidence-threshold = 0.9
 
@@ -28,7 +36,9 @@ confidence-threshold = 0.9
 ignore = true
 
 [bans]
-multiple-versions = "warn"
+# The GUI stack (Slint, winit, wgpu) pulls several versions of common crates;
+# duplicates are not actionable here.
+multiple-versions = "allow"
 wildcards = "deny"
 # Internal path dependencies between unpublished workspace crates are fine.
 allow-wildcard-paths = true

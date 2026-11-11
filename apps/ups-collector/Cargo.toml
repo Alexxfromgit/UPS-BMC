@@ -1,0 +1,37 @@
+[package]
+name = "ups-collector"
+description = "Headless UPS-BMC collector: polls the UPS, stores telemetry and events, serves the local API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+ups-api.workspace = true
+ups-model.workspace = true
+ups-source.workspace = true
+ups-store.workspace = true
+
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+winresource.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+tungstenite.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

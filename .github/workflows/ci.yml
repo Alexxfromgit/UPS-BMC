@@ -18,7 +18,7 @@ env:
   # Keep in sync with rust-toolchain.toml (bumped deliberately).
   RUST_TOOLCHAIN: "1.99"
   # Keep in sync with `rust-version` in Cargo.toml.
-  RUST_MSRV: "1.88"
+  RUST_MSRV: "1.92"
 
 # Actions are pinned to commit SHAs. The comment gives the release.
 jobs:
@@ -41,9 +41,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install libudev (hidapi on Linux)
+      - name: Install Linux build deps (hidapi, Slint)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config libfontconfig1-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config libfontconfig1-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_MSRV }}

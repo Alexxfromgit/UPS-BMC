@@ -1,6 +1,6 @@
-# ADR-0003: Changing UPS settings from UPS-BMC (planned)
+# ADR-0003: Changing UPS settings from UPS-BMC
 
-- Status: Proposed. This doesn't lift ADR-0001's read-only rule yet.
+- Status: **Accepted for the beeper only** (2026-11-11). Every other setting is still proposed.
 - Date: 2026-11-11
 
 ## Context
@@ -39,3 +39,20 @@ not a UPS setting. When the UPS only powers a router, it doesn't matter.
   `instcmd`.
 
 Planned as milestone M5, after monitoring (M1–M4) is stable.
+
+## Implementation (beeper, M1)
+The user asked for beeper on/off. It is harmless: it only controls the audible alarm.
+- `crates/ups-source/src/hid/control.rs` is the only code that writes. It checks
+  that the setting is on the allowlist (`Setting::Beeper`), that the field is
+  writable, and that the value is valid (1 = disabled, 2 = enabled). It reads
+  the report fresh, changes only the field's bits (`ups_hid::Field::insert`),
+  sends it, and **reads it back to verify**.
+- `ReadOnlyHid::send_feature_report` is `pub(super)`, carries a reviewed
+  `#[allow(clippy::disallowed_methods)]`, and is not reachable from
+  `hid-probe` or other crates.
+- The collector runs the write on the poller thread (single device owner)
+  through `POST /api/v1/settings/beeper` and records a `setting_changed` event.
+- The endpoint refuses requests that carry an `Origin` header and requires a
+  JSON body, so web pages can't change UPS settings (CSRF) through `127.0.0.1`.
+- UI: Settings → UPS beeper switch, available only while a supporting UPS is
+  connected.

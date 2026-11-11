@@ -1,0 +1,19 @@
+[package]
+name = "ups-store"
+description = "SQLite storage for UPS telemetry samples, events and device metadata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+ups-model.workspace = true
+
+chrono.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

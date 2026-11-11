@@ -1,0 +1,20 @@
+[package]
+name = "ups-api"
+description = "Wire types of the UPS-BMC collector HTTP/WebSocket API (v1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+ups-model.workspace = true
+
+chrono.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

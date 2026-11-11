@@ -1,4 +1,5 @@
-//! The only place in UPS-BMC that opens a HID device.
+//! The only place in UPS-BMC that opens a HID device (used by the collector's
+//! `HidSource` and by `hid-probe`).
 //!
 //! [`ReadOnlyHid`] exposes the read paths only: report descriptor,
 //! `GET_FEATURE`, input reports and string descriptors. Opening devices any
@@ -45,5 +46,14 @@ impl ReadOnlyHid {
     /// write. It isn't supported by hidapi's Linux hidraw backend.
     pub fn indexed_string(&self, index: i32) -> HidResult<Option<String>> {
         self.0.get_indexed_string(index)
+    }
+
+    /// `SET_FEATURE`. This is the **only** write in UPS-BMC. It is visible
+    /// only inside the `hid` module and must be called only from
+    /// `control.rs`, which enforces the ADR-0003 allowlist (value
+    /// validation, read-back verification).
+    #[allow(clippy::disallowed_methods)] // ADR-0003: allowlisted settings only
+    pub(super) fn send_feature_report(&self, buf: &[u8]) -> HidResult<()> {
+        self.0.send_feature_report(buf)
     }
 }

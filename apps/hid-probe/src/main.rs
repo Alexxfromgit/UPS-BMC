@@ -8,10 +8,9 @@
 //!   4. prints a decoded table and writes everything to a JSON file.
 //!
 //! It never writes to the device. All access goes through
-//! [`readonly::ReadOnlyHid`], and `clippy.toml` denies every other path.
+//! [`ReadOnlyHid`], and `clippy.toml` denies every other path.
 
 mod dump;
-mod readonly;
 
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
@@ -26,7 +25,7 @@ use hidapi::{DeviceInfo, HidApi};
 use ups_hid::{ReportDescriptor, ReportKind, usages};
 
 use crate::dump::{DESCRIPTOR_SOURCE, DeviceDump, InfoDump, ReportDump, decode, hex};
-use crate::readonly::ReadOnlyHid;
+use ups_source::hid::ReadOnlyHid;
 
 /// Size of hidapi's report descriptor buffer (`HID_API_MAX_REPORT_DESCRIPTOR_SIZE`).
 const DESCRIPTOR_BUF: usize = 4096;

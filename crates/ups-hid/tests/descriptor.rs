@@ -214,6 +214,42 @@ fn constant_items_with_usages_are_read_only_data() {
 }
 
 #[test]
+fn insert_writes_only_the_field_bits() {
+    let d = parse();
+    // Input report 2: three 1-bit flags at bits 0..3.
+    let charging = d.fields_in(ReportKind::Input, 2).nth(1).unwrap();
+    let mut data = [0b1111_1101u8];
+    assert!(charging.insert(&mut data, 1));
+    assert_eq!(data, [0b1111_1111]);
+    assert!(charging.insert(&mut data, 0));
+    assert_eq!(data, [0b1111_1101]);
+    // Out of range or too-short data: rejected, data untouched.
+    assert!(!charging.insert(&mut data, 2));
+    assert_eq!(data, [0b1111_1101]);
+
+    // 16-bit field at bit offset 8 (RunTimeToEmpty in feature report 1).
+    let runtime = d.fields_in(ReportKind::Feature, 1).nth(1).unwrap();
+    let mut payload = [0x64, 0x00, 0x00];
+    assert!(runtime.insert(&mut payload, 3600));
+    assert_eq!(payload, [0x64, 0x10, 0x0E]);
+    assert_eq!(runtime.extract(&payload), Some(3600));
+    assert!(!runtime.insert(&mut [0x64, 0x00], 1)); // too short
+    assert!(!runtime.insert(&mut payload, -1)); // below logical minimum
+}
+
+#[test]
+fn insert_round_trips_signed_values() {
+    #[rustfmt::skip]
+    let desc = [0x05, 0x84, 0x09, 0x36, 0x15, 0x80, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0xB1, 0x02];
+    let d = ReportDescriptor::parse(&desc).unwrap();
+    let f = &d.fields()[0];
+    let mut data = [0u8];
+    assert!(f.insert(&mut data, -2));
+    assert_eq!(data, [0xFE]);
+    assert_eq!(f.extract(&data), Some(-2));
+}
+
+#[test]
 fn fields_wider_than_32_bits_are_parsed_but_not_extracted() {
     let desc = [0x05, 0x84, 0x09, 0x30, 0x75, 0x28, 0x95, 0x01, 0xB1, 0x02];
     let d = ReportDescriptor::parse(&desc).unwrap();

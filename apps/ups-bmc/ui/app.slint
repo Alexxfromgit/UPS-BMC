@@ -1,0 +1,681 @@
+// UPS-BMC desktop UI. All values are prepared in Rust (src/view.rs); this
+// file is layout and styling only.
+
+import { Button, AboutSlint, ScrollView, Switch } from "std-widgets.slint";
+
+export struct EventRow {
+    time: string,
+    text: string,
+    // 0 = info, 1 = warning, 2 = critical
+    level: int,
+}
+
+global Theme {
+    out property <color> bg: #0d1117;
+    out property <color> card: #161b22;
+    out property <color> border: #262d36;
+    out property <color> text: #e6edf3;
+    out property <color> muted: #8b949e;
+    out property <color> green: #22c55e;
+    out property <color> amber: #f59e0b;
+    out property <color> red: #ef4444;
+    out property <color> blue: #60a5fa;
+    out property <color> violet: #a78bfa;
+    out property <color> grey: #64748b;
+
+    // State codes from Rust: 0 offline/unknown, 1 utility, 2 battery, 3 critical.
+    public pure function state-color(state: int) -> color {
+        if state == 1 { return green; }
+        if state == 2 { return amber; }
+        if state == 3 { return red; }
+        return grey;
+    }
+}
+
+component Card inherits Rectangle {
+    in property <string> title;
+    background: Theme.card;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 6px;
+        if root.title != "": Text {
+            text: root.title;
+            color: Theme.muted;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        @children
+    }
+}
+
+component Metric inherits Card {
+    in property <string> value;
+    in property <string> detail;
+    in property <color> accent: Theme.text;
+    Text {
+        text: root.value;
+        color: root.accent;
+        font-size: 26px;
+        font-weight: 700;
+    }
+    Text {
+        text: root.detail;
+        color: Theme.muted;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+}
+
+component Gauge inherits Rectangle {
+    in property <string> arc;
+    in property <color> tint;
+    in property <string> value;
+    in property <string> caption;
+    width: 132px;
+    height: 132px;
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        commands: "M 50 6 A 44 44 0 1 1 49.99 6";
+        stroke: Theme.border;
+        stroke-width: 10px;
+        fill: transparent;
+    }
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        commands: root.arc;
+        stroke: root.tint;
+        stroke-width: 10px;
+        fill: transparent;
+    }
+    VerticalLayout {
+        alignment: center;
+        Text {
+            text: root.value;
+            color: Theme.text;
+            font-size: 28px;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.caption;
+            color: Theme.muted;
+            font-size: 11px;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+component LegendDot inherits HorizontalLayout {
+    in property <color> tint;
+    in property <string> label;
+    spacing: 6px;
+    alignment: start;
+    Rectangle {
+        width: 10px;
+        height: 10px;
+        y: 3px;
+        border-radius: 5px;
+        background: root.tint;
+    }
+    Text {
+        text: root.label;
+        color: Theme.muted;
+        font-size: 11px;
+    }
+}
+
+// A line chart drawn from SVG path commands in a 1000 × 100 view box.
+component Chart inherits Card {
+    in property <string> shade;
+    in property <string> line-a;
+    in property <color> color-a;
+    in property <string> label-a;
+    in property <string> line-b;
+    in property <color> color-b;
+    in property <string> label-b;
+    in property <string> top;
+    in property <string> bottom;
+    in property <string> span;
+    // Plot size in logical pixels; Rust renders the paths at this size.
+    out property <length> plot-width: plot.width;
+    out property <length> plot-height: plot.height;
+    HorizontalLayout {
+        spacing: 8px;
+        VerticalLayout {
+            width: 34px;
+            Text {
+                text: root.top;
+                color: Theme.muted;
+                font-size: 10px;
+            }
+            Rectangle { }
+            Text {
+                text: root.bottom;
+                color: Theme.muted;
+                font-size: 10px;
+            }
+        }
+        plot := Rectangle {
+            min-height: 110px;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 6px;
+            clip: true;
+            for frac in [0.25, 0.5, 0.75]: Rectangle {
+                y: parent.height * frac;
+                height: 1px;
+                background: Theme.border;
+            }
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: plot.width / 1px;
+                viewbox-height: plot.height / 1px;
+                commands: root.shade;
+                fill: #f59e0b30;
+                stroke-width: 0px;
+            }
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: plot.width / 1px;
+                viewbox-height: plot.height / 1px;
+                commands: root.line-b;
+                stroke: root.color-b;
+                stroke-width: 1.5px;
+                fill: transparent;
+            }
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: plot.width / 1px;
+                viewbox-height: plot.height / 1px;
+                commands: root.line-a;
+                stroke: root.color-a;
+                stroke-width: 2px;
+                fill: transparent;
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 16px;
+        padding-left: 42px;
+        LegendDot {
+            tint: root.color-a;
+            label: root.label-a;
+        }
+        if root.label-b != "": LegendDot {
+            tint: root.color-b;
+            label: root.label-b;
+        }
+        LegendDot {
+            tint: Theme.amber;
+            label: "on battery";
+        }
+        Rectangle { }
+        Text {
+            text: root.span;
+            color: Theme.muted;
+            font-size: 11px;
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "UPS-BMC · UPS & Battery Monitoring Center";
+    icon: @image-url("icons/ups-online.png");
+    background: Theme.bg;
+    min-width: 960px;
+    min-height: 680px;
+    preferred-width: 1180px;
+    preferred-height: 780px;
+    default-font-size: 13px;
+
+    in property <int> state;
+    in property <string> device-name: "UPS-BMC";
+    in property <string> connection-text: "Connecting…";
+    in property <string> updated-text;
+    in property <string> status-title: "Connecting to the collector…";
+    in property <string> status-detail;
+    in property <bool> show-start: false;
+
+    in property <string> charge-text: "—";
+    in property <string> charge-arc;
+    in property <string> runtime-text: "—";
+    in property <string> load-text: "—";
+    in property <string> load-detail;
+    in property <string> input-text: "—";
+    in property <string> input-detail;
+    in property <string> output-text: "—";
+    in property <string> output-detail;
+    in property <string> battery-v-text: "—";
+    in property <string> battery-v-detail;
+
+    in property <string> chart-shade;
+    in property <string> chart-charge;
+    in property <string> chart-load;
+    in property <string> chart-input;
+    in property <string> chart-output;
+    in property <string> volt-top;
+    in property <string> volt-bottom;
+    in property <string> chart-span;
+
+    out property <length> plot-width: charge-chart.plot-width;
+    out property <length> plot-height: charge-chart.plot-height;
+
+
+    in property <[EventRow]> events;
+    in property <string> footer-text;
+
+    callback start-collector();
+
+    // Settings
+    in-out property <bool> beeper-on;
+    in property <bool> beeper-available;
+    in property <bool> beeper-busy;
+    in property <string> beeper-text;
+    in-out property <bool> autostart-on;
+    in property <bool> autostart-available;
+    in property <string> settings-message;
+    callback set-beeper(bool);
+    callback set-autostart(bool);
+
+    settings-popup := PopupWindow {
+        close-policy: PopupClosePolicy.close-on-click-outside;
+        x: root.width - 420px - 18px;
+        y: 52px;
+        width: 420px;
+        Rectangle {
+            background: Theme.card;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000080;
+            VerticalLayout {
+                padding: 18px;
+                spacing: 16px;
+                Text {
+                    text: "Settings";
+                    color: Theme.text;
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "UPS beeper";
+                            color: Theme.text;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: root.beeper-busy ? "Applying…" : root.beeper-text;
+                            color: Theme.muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
+                    Switch {
+                        checked <=> root.beeper-on;
+                        enabled: root.beeper-available && !root.beeper-busy;
+                        toggled => {
+                            root.set-beeper(self.checked);
+                        }
+                    }
+                }
+                if root.autostart-available: HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "Start with Windows";
+                            color: Theme.text;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "Open UPS-BMC in the notification area at sign-in. It starts the collector, so monitoring resumes automatically.";
+                            color: Theme.muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
+                    Switch {
+                        checked <=> root.autostart-on;
+                        toggled => {
+                            root.set-autostart(self.checked);
+                        }
+                    }
+                }
+                if root.settings-message != "": Text {
+                    text: root.settings-message;
+                    color: Theme.amber;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+
+    about-popup := PopupWindow {
+        x: (root.width - 360px) / 2;
+        y: (root.height - 260px) / 2;
+        width: 360px;
+        height: 260px;
+        Rectangle {
+            background: Theme.card;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.border;
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                Text {
+                    text: "UPS-BMC — UPS & Battery Monitoring Center";
+                    color: Theme.text;
+                    font-weight: 700;
+                }
+                Text {
+                    text: root.footer-text;
+                    color: Theme.muted;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                AboutSlint { }
+            }
+        }
+    }
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 14px;
+
+        // Header
+        HorizontalLayout {
+            spacing: 12px;
+            Text {
+                text: root.device-name;
+                color: Theme.text;
+                font-size: 20px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: pill.preferred-width + 20px;
+                height: 24px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 12px;
+                background: Theme.state-color(root.state).with-alpha(0.15);
+                pill := Text {
+                    text: root.connection-text;
+                    color: Theme.state-color(root.state);
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+            }
+            Rectangle { }
+            Text {
+                text: root.updated-text;
+                color: Theme.muted;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                width: settings-label.preferred-width + 8px;
+                mouse-cursor: pointer;
+                clicked => {
+                    settings-popup.show();
+                }
+                settings-label := Text {
+                    text: "Settings";
+                    color: Theme.blue;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+            TouchArea {
+                width: about-label.preferred-width + 8px;
+                mouse-cursor: pointer;
+                clicked => {
+                    about-popup.show();
+                }
+                about-label := Text {
+                    text: "About";
+                    color: Theme.blue;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Status banner
+        Rectangle {
+            height: 76px;
+            border-radius: 12px;
+            background: Theme.state-color(root.state).with-alpha(0.12);
+            border-width: 1px;
+            border-color: Theme.state-color(root.state).with-alpha(0.45);
+            HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 18px;
+                spacing: 14px;
+                Image {
+                    width: 40px;
+                    source: root.state == 1 ? @image-url("icons/ups-online.png")
+                        : root.state == 2 ? @image-url("icons/ups-battery.png")
+                        : root.state == 3 ? @image-url("icons/ups-critical.png")
+                        : @image-url("icons/ups-offline.png");
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: root.status-title;
+                        color: Theme.state-color(root.state);
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: root.status-detail;
+                        color: Theme.text;
+                        font-size: 13px;
+                    }
+                }
+                Rectangle { }
+                if root.show-start: VerticalLayout {
+                    alignment: center;
+                    Button {
+                        text: "Start collector";
+                        primary: true;
+                        clicked => {
+                            root.start-collector();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Metrics
+        HorizontalLayout {
+            spacing: 14px;
+            Card {
+                title: "BATTERY";
+                horizontal-stretch: 0;
+                HorizontalLayout {
+                    spacing: 16px;
+                    Gauge {
+                        arc: root.charge-arc;
+                        tint: Theme.state-color(root.state);
+                        value: root.charge-text;
+                        caption: "charge";
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        Text {
+                            text: "Estimated runtime";
+                            color: Theme.muted;
+                            font-size: 11px;
+                        }
+                        Text {
+                            text: root.runtime-text;
+                            color: Theme.text;
+                            font-size: 22px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: root.battery-v-text;
+                            color: Theme.text;
+                            font-size: 14px;
+                        }
+                        Text {
+                            text: root.battery-v-detail;
+                            color: Theme.muted;
+                            font-size: 11px;
+                        }
+                    }
+                }
+            }
+            GridLayout {
+                spacing: 14px;
+                Row {
+                    Metric {
+                        title: "LOAD";
+                        value: root.load-text;
+                        detail: root.load-detail;
+                        accent: Theme.violet;
+                    }
+                    Metric {
+                        title: "INPUT (MAINS)";
+                        value: root.input-text;
+                        detail: root.input-detail;
+                        accent: Theme.blue;
+                    }
+                }
+                Row {
+                    Metric {
+                        title: "OUTPUT";
+                        value: root.output-text;
+                        detail: root.output-detail;
+                    }
+                    Metric {
+                        title: "UPDATED";
+                        value: root.updated-text == "" ? "—" : root.updated-text;
+                        detail: "refreshed every second";
+                    }
+                }
+            }
+        }
+
+        // Charts
+        HorizontalLayout {
+            spacing: 14px;
+            vertical-stretch: 1;
+            charge-chart := Chart {
+                title: "BATTERY CHARGE & LOAD (%)";
+                shade: root.chart-shade;
+                line-a: root.chart-charge;
+                color-a: Theme.green;
+                label-a: "charge";
+                line-b: root.chart-load;
+                color-b: Theme.violet;
+                label-b: "load";
+                top: "100";
+                bottom: "0";
+                span: root.chart-span;
+            }
+            Chart {
+                title: "VOLTAGE (V)";
+                shade: root.chart-shade;
+                line-a: root.chart-input;
+                color-a: Theme.blue;
+                label-a: "input";
+                line-b: root.chart-output;
+                color-b: Theme.muted;
+                label-b: "output";
+                top: root.volt-top;
+                bottom: root.volt-bottom;
+                span: root.chart-span;
+            }
+        }
+
+        // Events
+        Card {
+            title: "RECENT EVENTS";
+            height: 170px;
+            ScrollView {
+                VerticalLayout {
+                    spacing: 4px;
+                    if root.events.length == 0: Text {
+                        text: "No events yet.";
+                        color: Theme.muted;
+                    }
+                    for e in root.events: HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            y: 5px;
+                            border-radius: 4px;
+                            background: e.level == 2 ? Theme.red : e.level == 1 ? Theme.amber : Theme.grey;
+                        }
+                        Text {
+                            text: e.time;
+                            color: Theme.muted;
+                            width: 112px;
+                        }
+                        Text {
+                            text: e.text;
+                            color: Theme.text;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The notification-area icon. Closing the window hides it; "Quit" exits.
+export component Tray inherits SystemTrayIcon {
+    in property <int> state;
+    icon: root.state == 1 ? @image-url("icons/ups-online.png")
+        : root.state == 2 ? @image-url("icons/ups-battery.png")
+        : root.state == 3 ? @image-url("icons/ups-critical.png")
+        : @image-url("icons/ups-offline.png");
+    in property <string> tip: "UPS-BMC";
+    tooltip: root.tip;
+    clicked => {
+        root.open();
+    }
+
+    callback open();
+    callback quit();
+
+    Menu {
+        MenuItem {
+            title: "Open UPS-BMC";
+            activated => {
+                root.open();
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: "Quit";
+            activated => {
+                root.quit();
+            }
+        }
+    }
+}
