@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use tungstenite::stream::MaybeTlsStream;
 use ups_api::{
-    Event, EventsResponse, HistoryPoint, HistoryResponse, LiveMessage, Outage, OutagesResponse,
-    StatsResponse, StatusResponse,
+    Event, EventsResponse, HealthReport, HistoryPoint, HistoryResponse, LiveMessage, Outage,
+    OutagesResponse, StatsResponse, StatusResponse,
 };
 
 use crate::view::{self, CHART_WINDOW, EventLine, OutagesView, View};
@@ -21,6 +21,7 @@ pub enum Update {
     /// A live event worth a desktop notification.
     Notify(Event),
     Outages(Box<OutagesView>),
+    Health(Box<HealthReport>),
 }
 
 /// Configuration of the client thread.
@@ -190,9 +191,44 @@ pub fn set_assumed_load(address: &str, watts: Option<f32>) -> Result<String, Str
     )
 }
 
+/// Sets or clears the battery installation date.
+pub fn set_battery_installed(
+    address: &str,
+    installed: Option<chrono::NaiveDate>,
+) -> Result<String, String> {
+    post(
+        address,
+        "settings/battery",
+        &ups_api::BatteryRequest { installed },
+    )
+}
+
+/// Starts or cancels the guided runtime test.
+pub fn runtime_test(address: &str, request: ups_api::RuntimeTestRequest) -> Result<String, String> {
+    post(address, "battery/test", &request)
+}
+
+/// The current battery health report.
+pub fn fetch_health(address: &str) -> Result<HealthReport, String> {
+    ureq::get(format!("http://{address}/api/v1/health"))
+        .config()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .call()
+        .map_err(|e| e.to_string())?
+        .body_mut()
+        .read_json()
+        .map_err(|e| e.to_string())
+}
+
 /// POSTs a setting; returns the collector's message or its error text.
 fn post_setting(address: &str, name: &str, body: &impl serde::Serialize) -> Result<String, String> {
-    let mut response = ureq::post(format!("http://{address}/api/v1/settings/{name}"))
+    post(address, &format!("settings/{name}"), body)
+}
+
+/// POSTs to `/api/v1/{path}`; returns the collector's message or its error text.
+fn post(address: &str, path: &str, body: &impl serde::Serialize) -> Result<String, String> {
+    let mut response = ureq::post(format!("http://{address}/api/v1/{path}"))
         .config()
         .timeout_global(Some(Duration::from_secs(15)))
         .http_status_as_error(false)
@@ -219,6 +255,7 @@ fn post_setting(address: &str, name: &str, body: &impl serde::Serialize) -> Resu
 struct Outages {
     list: Vec<Outage>,
     stats: Option<StatsResponse>,
+    health: Option<HealthReport>,
     stats_at: Option<Instant>,
 }
 
@@ -239,6 +276,9 @@ impl Outages {
         self.stats_at = Some(Instant::now());
         if let Ok(s) = http::<StatsResponse>(config, "/api/v1/stats") {
             self.stats = Some(s);
+        }
+        if let Ok(h) = http::<HealthReport>(config, "/api/v1/health") {
+            self.health = Some(h);
         }
     }
 
@@ -268,6 +308,9 @@ impl Outages {
             self.stats.as_ref(),
             Utc::now(),
         ))));
+        if let Some(h) = &self.health {
+            send(Update::Health(Box::new(h.clone())));
+        }
     }
 }
 

@@ -9,15 +9,17 @@
 
 mod autostart;
 mod client;
+mod health_view;
 mod launch;
 mod view;
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use anyhow::Result;
 use clap::Parser;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, StandardListViewItem, VecModel};
-use ups_api::{DEFAULT_PORT, Event, EventKind};
+use ups_api::{DEFAULT_PORT, Event, EventKind, HealthReport, RuntimeTestRequest};
 
 use crate::client::{ClientConfig, Update};
 use crate::view::{EventLine, OutagesView, View};
@@ -94,8 +96,164 @@ fn apply_view(w: &AppWindow, tray: &Tray, v: &View) {
     if !w.get_beeper_busy() {
         w.set_beeper_on(v.beeper_on);
     }
+    w.set_test_phase(v.test_phase);
+    w.set_test_text(s(&v.test_text));
+    if v.test_phase != 0 {
+        w.set_test_message(SharedString::new());
+    }
     tray.set_state(v.state);
     tray.set_tip(s(&v.tooltip));
+    render_trend(w);
+}
+
+thread_local! {
+    /// The latest health trend (UI thread), re-rendered at the plot's size.
+    static TREND: RefCell<health_view::TrendData> = RefCell::default();
+    /// The installation date last shown, so typing isn't overwritten.
+    static SHOWN_INSTALLED: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn render_trend(w: &AppWindow) {
+    let t = TREND.with_borrow(|t| {
+        t.render(
+            f64::from(w.get_trend_width()),
+            f64::from(w.get_trend_height()),
+        )
+    });
+    w.set_trend_line(t.line.into());
+    w.set_trend_dots(t.dots.into());
+    w.set_trend_guides(t.guides.into());
+}
+
+fn apply_health(w: &AppWindow, report: &HealthReport) {
+    let v = health_view::build(report, chrono::Utc::now());
+    let s = |x: &str| SharedString::from(x);
+    w.set_health_level(v.level);
+    w.set_health_verdict(s(&v.verdict));
+    w.set_health_text(s(&v.health_text));
+    w.set_health_detail(s(&v.health_detail));
+    w.set_health_runtime_text(s(&v.runtime_text));
+    w.set_health_runtime_detail(s(&v.runtime_detail));
+    w.set_health_age_text(s(&v.age_text));
+    w.set_health_age_detail(s(&v.age_detail));
+    w.set_health_ups_text(s(&v.ups_text));
+    w.set_health_ups_detail(s(&v.ups_detail));
+    w.set_health_reasons(s(&v.reasons));
+    w.set_trend_span(s(&v.trend_span));
+    w.set_health_summary(s(&v.summary));
+    w.set_discharge_rows(table(&v.rows));
+    let changed = SHOWN_INSTALLED.with_borrow_mut(|shown| {
+        let changed = shown.as_deref() != Some(v.installed_value.as_str());
+        *shown = Some(v.installed_value.clone());
+        changed
+    });
+    if changed {
+        w.set_installed_input(s(&v.installed_value));
+    }
+    TREND.set(v.trend);
+    render_trend(w);
+}
+
+/// A table model from rows of cells.
+fn table(rows: &[Vec<String>]) -> ModelRc<ModelRc<StandardListViewItem>> {
+    let rows: Vec<ModelRc<StandardListViewItem>> = rows
+        .iter()
+        .map(|r| {
+            let cells: Vec<StandardListViewItem> = r
+                .iter()
+                .map(|c| StandardListViewItem::from(c.as_str()))
+                .collect();
+            ModelRc::from(Rc::new(VecModel::from(cells)))
+        })
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Runs a collector request off the UI thread, shows its result with `show`,
+/// then refreshes the Battery health tab.
+fn request_then_refresh(
+    w: slint::Weak<AppWindow>,
+    address: String,
+    request: impl FnOnce(&str) -> Result<String, String> + Send + 'static,
+    show: fn(&AppWindow, SharedString),
+) {
+    std::thread::spawn(move || {
+        let result = request(&address);
+        let health = client::fetch_health(&address).ok();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(w) = w.upgrade() else { return };
+            show(&w, result.unwrap_or_else(|e| e).into());
+            if let Some(h) = health {
+                apply_health(&w, &h);
+            }
+        });
+    });
+}
+
+/// Battery health tab: installation date and the guided runtime test.
+fn wire_health(window: &AppWindow, collector: &str) {
+    window.set_test_stop_index(health_view::DEFAULT_STOP_INDEX);
+
+    let (w, address) = (window.as_weak(), collector.to_owned());
+    window.on_set_battery_installed(move |text| {
+        let text = text.trim();
+        let date = if text.is_empty() {
+            None
+        } else if let Some(d) = ["%Y-%m-%d", "%d.%m.%Y"]
+            .iter()
+            .find_map(|f| chrono::NaiveDate::parse_from_str(text, f).ok())
+        {
+            Some(d)
+        } else {
+            if let Some(w) = w.upgrade() {
+                w.set_battery_message("Enter the date as YYYY-MM-DD, e.g. 2024-03-15.".into());
+            }
+            return;
+        };
+        request_then_refresh(
+            w.clone(),
+            address.clone(),
+            move |a| client::set_battery_installed(a, date),
+            AppWindow::set_battery_message,
+        );
+    });
+
+    let (w, address) = (window.as_weak(), collector.to_owned());
+    window.on_battery_replaced_today(move || {
+        let today = chrono::Local::now().date_naive();
+        request_then_refresh(
+            w.clone(),
+            address.clone(),
+            move |a| client::set_battery_installed(a, Some(today)),
+            AppWindow::set_battery_message,
+        );
+    });
+
+    let (w, address) = (window.as_weak(), collector.to_owned());
+    window.on_start_runtime_test(move |index| {
+        let Some(&stop_at_pct) = usize::try_from(index)
+            .ok()
+            .and_then(|i| health_view::STOP_LEVELS.get(i))
+        else {
+            return;
+        };
+        request_then_refresh(
+            w.clone(),
+            address.clone(),
+            move |a| client::runtime_test(a, RuntimeTestRequest::Start { stop_at_pct }),
+            AppWindow::set_test_message,
+        );
+    });
+
+    let (w, address) = (window.as_weak(), collector.to_owned());
+    window.on_cancel_runtime_test(move || {
+        request_then_refresh(
+            w.clone(),
+            address.clone(),
+            |a| client::runtime_test(a, RuntimeTestRequest::Cancel),
+            AppWindow::set_test_message,
+        );
+    });
 }
 
 fn apply_events(w: &AppWindow, lines: Vec<EventLine>) {
@@ -123,18 +281,7 @@ fn apply_outages(w: &AppWindow, v: &OutagesView) {
         })
         .collect();
     w.set_stat_cards(ModelRc::from(Rc::new(VecModel::from(cards))));
-    let rows: Vec<ModelRc<StandardListViewItem>> = v
-        .rows
-        .iter()
-        .map(|r| {
-            let cells: Vec<StandardListViewItem> = r
-                .iter()
-                .map(|c| StandardListViewItem::from(c.as_str()))
-                .collect();
-            ModelRc::from(Rc::new(VecModel::from(cells)))
-        })
-        .collect();
-    w.set_outage_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+    w.set_outage_rows(table(&v.rows));
     w.set_outages_summary(v.summary.as_str().into());
     let strings = |items: &[String]| {
         let v: Vec<SharedString> = items.iter().map(|s| s.as_str().into()).collect();
@@ -247,6 +394,10 @@ fn notify(event: &Event) {
         EventKind::CommunicationRestored => "UPS connection restored",
         EventKind::Overload => "UPS overloaded",
         EventKind::ReplaceBattery => "Replace the UPS battery",
+        EventKind::RuntimeTestRestorePower => "Runtime test: plug the UPS back in",
+        EventKind::RuntimeTest if event.message.starts_with("Runtime test finished") => {
+            "Runtime test finished"
+        }
         _ => return,
     };
     let mut n = notify_rust::Notification::new();
@@ -362,6 +513,7 @@ fn main() -> Result<()> {
     wire_tray(&window, &tray);
     wire_settings(&window, &args.collector);
     wire_reports(&window, &args.collector);
+    wire_health(&window, &args.collector);
 
     let collector_args: Vec<String> = if args.sim {
         vec!["--source".into(), "sim".into()]
@@ -402,6 +554,7 @@ fn main() -> Result<()> {
                     Update::Events(lines) => apply_events(&w, lines),
                     Update::Notify(e) => notify(&e),
                     Update::Outages(v) => apply_outages(&w, &v),
+                    Update::Health(h) => apply_health(&w, &h),
                 }
             });
         },

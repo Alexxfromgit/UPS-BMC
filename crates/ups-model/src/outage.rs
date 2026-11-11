@@ -49,6 +49,10 @@ pub struct Outage {
     /// because the UPS reported 0 (below its measuring range).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub power_estimated: bool,
+    /// True when this discharge was a guided runtime test (the user unplugged
+    /// the UPS on purpose to measure the battery).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_test: bool,
     /// Energy delivered from the battery (integrated output power).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub energy_wh: Option<f32>,
@@ -77,6 +81,7 @@ impl Outage {
             battery_v_end: None,
             battery_v_min: None,
             power_estimated: false,
+            runtime_test: false,
             energy_wh: None,
             recharged_at: None,
         }

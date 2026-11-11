@@ -14,8 +14,9 @@ use serde::Deserialize;
 use tokio::sync::broadcast;
 use tracing::debug;
 use ups_api::{
-    AssumedLoadRequest, BeeperRequest, EventsResponse, HistoryResponse, LiveMessage,
-    OutagesResponse, SettingResponse, StatsResponse, StatusResponse,
+    AssumedLoadRequest, BatteryRequest, BeeperRequest, EventsResponse, HealthReport,
+    HistoryResponse, LiveMessage, OutagesResponse, RuntimeTestRequest, SettingResponse,
+    StatsResponse, StatusResponse, UpsStatus,
 };
 use ups_source::Setting;
 
@@ -51,6 +52,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/outages", get(outages))
         .route("/api/v1/stats", get(stats))
         .route("/api/v1/report", get(report))
+        .route("/api/v1/health", get(health))
+        .route("/api/v1/settings/battery", post(set_battery))
+        .route("/api/v1/battery/test", post(runtime_test))
         .with_state(state)
 }
 
@@ -326,23 +330,12 @@ async fn set_assumed_load(
             "watts must be between 1 and 2000".into(),
         ));
     }
-    let unavailable = || {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "the collector is shutting down".to_owned(),
-        )
-    };
-    let (reply, rx) = tokio::sync::oneshot::channel();
-    state
-        .ingest
-        .send(crate::poller::PollerMsg::SetAssumedLoad {
-            watts: req.watts,
-            reply,
-        })
-        .map_err(|_| unavailable())?;
-    rx.await
-        .map_err(|_| unavailable())?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    ask_ingest(&state, |reply| crate::poller::PollerMsg::SetAssumedLoad {
+        watts: req.watts,
+        reply,
+    })
+    .await?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(SettingResponse {
         ok: true,
         message: match req.watts {
@@ -350,4 +343,97 @@ async fn set_assumed_load(
             None => "Load estimate cleared".into(),
         },
     }))
+}
+
+/// `GET /api/v1/health`: battery health from the outages since the battery
+/// was installed (or all outages).
+async fn health(State(state): State<AppState>) -> Result<Json<HealthReport>, ApiError> {
+    let now = Utc::now();
+    let replace_flag = current(&state)
+        .snapshot
+        .and_then(|s| s.status)
+        .is_some_and(|f| f.contains(UpsStatus::RB));
+    let report = query(&state, move |s| {
+        let installed = s.battery_installed()?;
+        let from = installed.and_then(|d| d.and_hms_opt(0, 0, 0)).map_or(
+            chrono::DateTime::<Utc>::UNIX_EPOCH,
+            |d| {
+                // A day early: the date is local, timestamps are UTC.
+                d.and_utc() - chrono::Duration::days(1)
+            },
+        );
+        let outages = s.outages_since(from, 100_000)?;
+        Ok(ups_analysis::health::assess(
+            &outages,
+            installed,
+            replace_flag,
+            now,
+            &ups_analysis::health::HealthConfig::default(),
+        ))
+    })
+    .await?;
+    Ok(Json(report))
+}
+
+/// Sends a request to the ingest thread and waits for its reply.
+async fn ask_ingest<T>(
+    state: &AppState,
+    msg: impl FnOnce(tokio::sync::oneshot::Sender<Result<T, String>>) -> crate::poller::PollerMsg,
+) -> Result<Result<T, String>, ApiError> {
+    let unavailable = || {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the collector is shutting down".to_owned(),
+        )
+    };
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    state.ingest.send(msg(reply)).map_err(|_| unavailable())?;
+    rx.await.map_err(|_| unavailable())
+}
+
+/// `POST /api/v1/settings/battery` with `{"installed": "2024-03-15"}` or `{"installed": null}`.
+async fn set_battery(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<BatteryRequest>,
+) -> Result<Json<SettingResponse>, ApiError> {
+    reject_browsers(&headers)?;
+    if req.installed.is_some_and(|d| d > Local::now().date_naive()) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the installation date can't be in the future".into(),
+        ));
+    }
+    ask_ingest(&state, |reply| {
+        crate::poller::PollerMsg::SetBatteryInstalled {
+            date: req.installed,
+            reply,
+        }
+    })
+    .await?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(SettingResponse {
+        ok: true,
+        message: match req.installed {
+            Some(d) => format!("Battery installed on {}", d.format("%d.%m.%Y")),
+            None => "Battery installation date cleared".into(),
+        },
+    }))
+}
+
+/// `POST /api/v1/battery/test` with `{"action":"start","stop_at_pct":50}` or
+/// `{"action":"cancel"}`. Nothing is sent to the UPS: the user unplugs it.
+async fn runtime_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<RuntimeTestRequest>,
+) -> Result<Json<SettingResponse>, ApiError> {
+    reject_browsers(&headers)?;
+    let message = ask_ingest(&state, |reply| crate::poller::PollerMsg::RuntimeTest {
+        request,
+        reply,
+    })
+    .await?
+    .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(Json(SettingResponse { ok: true, message }))
 }

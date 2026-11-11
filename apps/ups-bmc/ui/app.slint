@@ -238,6 +238,98 @@ component Chart inherits Card {
     }
 }
 
+// Battery health trend: each discharge vs. the baseline (40–110 %), with
+// guides at 80 % (aging) and 60 % (replace). Rust renders the paths at the
+// plot's pixel size.
+component TrendChart inherits Card {
+    in property <string> line;
+    in property <string> dots;
+    in property <string> guides;
+    in property <string> span;
+    in property <string> empty-text;
+    out property <length> plot-width: plot.width;
+    out property <length> plot-height: plot.height;
+    HorizontalLayout {
+        spacing: 8px;
+        VerticalLayout {
+            width: 34px;
+            Text {
+                text: "110%";
+                color: Theme.muted;
+                font-size: 10px;
+            }
+            Rectangle { }
+            Text {
+                text: "40%";
+                color: Theme.muted;
+                font-size: 10px;
+            }
+        }
+        plot := Rectangle {
+            min-height: 110px;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 6px;
+            clip: true;
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: plot.width / 1px;
+                viewbox-height: plot.height / 1px;
+                commands: root.guides;
+                stroke: Theme.muted.with-alpha(0.5);
+                stroke-width: 1px;
+                fill: transparent;
+            }
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: plot.width / 1px;
+                viewbox-height: plot.height / 1px;
+                commands: root.line;
+                stroke: Theme.green;
+                stroke-width: 2px;
+                fill: transparent;
+            }
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: plot.width / 1px;
+                viewbox-height: plot.height / 1px;
+                commands: root.dots;
+                fill: Theme.green;
+                stroke-width: 0px;
+            }
+            if root.line == "": Text {
+                text: root.empty-text;
+                color: Theme.muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: word-wrap;
+                width: parent.width - 24px;
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 16px;
+        padding-left: 42px;
+        LegendDot {
+            tint: Theme.green;
+            label: "discharge vs. baseline";
+        }
+        LegendDot {
+            tint: Theme.muted;
+            label: "80 % aging · 60 % replace";
+        }
+        Rectangle { }
+        Text {
+            text: root.span;
+            color: Theme.muted;
+            font-size: 11px;
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "UPS-BMC · UPS & Battery Monitoring Center";
     icon: @image-url("icons/ups-online.png");
@@ -309,6 +401,38 @@ export component AppWindow inherits Window {
     callback set-autostart(bool);
     in property <string> assumed-load-text: "not set";
     callback set-assumed-load(string);
+
+    // Battery health
+    in property <int> health-level;
+    in property <string> health-verdict: "Loading…";
+    in property <string> health-text: "—";
+    in property <string> health-detail;
+    in property <string> health-runtime-text: "—";
+    in property <string> health-runtime-detail;
+    in property <string> health-age-text: "—";
+    in property <string> health-age-detail;
+    in property <string> health-ups-text: "—";
+    in property <string> health-ups-detail;
+    in property <string> health-reasons;
+    in property <string> trend-line;
+    in property <string> trend-dots;
+    in property <string> trend-guides;
+    in property <string> trend-span;
+    out property <length> trend-width: trend-chart.plot-width;
+    out property <length> trend-height: trend-chart.plot-height;
+    in property <[[StandardListViewItem]]> discharge-rows;
+    in property <string> health-summary;
+    in-out property <string> installed-input;
+    in property <string> battery-message;
+    callback set-battery-installed(string);
+    callback battery-replaced-today();
+    // Guided runtime test: 0 none, 1 armed, 2 running, 3 restore power.
+    in property <int> test-phase;
+    in property <string> test-text;
+    in property <string> test-message;
+    in-out property <int> test-stop-index: 3;
+    callback start-runtime-test(int);
+    callback cancel-runtime-test();
 
     settings-popup := PopupWindow {
         close-policy: PopupClosePolicy.close-on-click-outside;
@@ -759,6 +883,186 @@ export component AppWindow inherits Window {
                         { title: "Energy" }, { title: "Recharge" }, { title: "Notes" },
                     ];
                     rows: root.outage-rows;
+                }
+            }
+        }
+
+        Tab {
+            title: "Battery health";
+            VerticalLayout {
+                padding-top: 14px;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 14px;
+                    Card {
+                        title: "BATTERY HEALTH";
+                        horizontal-stretch: 2;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: root.health-text;
+                                color: Theme.state-color(root.health-level);
+                                font-size: 30px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                Text {
+                                    text: root.health-verdict;
+                                    color: Theme.state-color(root.health-level);
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: root.health-detail;
+                                    color: Theme.muted;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+                    Metric {
+                        title: "FULL-CHARGE RUNTIME";
+                        horizontal-stretch: 1;
+                        value: root.health-runtime-text;
+                        detail: root.health-runtime-detail;
+                    }
+                    Metric {
+                        title: "BATTERY AGE";
+                        horizontal-stretch: 1;
+                        value: root.health-age-text;
+                        detail: root.health-age-detail;
+                    }
+                    Metric {
+                        title: "UPS SELF-CHECK";
+                        horizontal-stretch: 1;
+                        value: root.health-ups-text;
+                        detail: root.health-ups-detail;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 14px;
+                    trend-chart := TrendChart {
+                        title: "CAPACITY TREND";
+                        horizontal-stretch: 3;
+                        line: root.trend-line;
+                        dots: root.trend-dots;
+                        guides: root.trend-guides;
+                        span: root.trend-span;
+                        empty-text: "The trend appears after two outages (or runtime tests) that each use at least 5 % of the charge.";
+                    }
+                    Card {
+                        title: "WHY";
+                        horizontal-stretch: 2;
+                        Text {
+                            text: root.health-reasons;
+                            color: Theme.text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                            vertical-stretch: 1;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 14px;
+                    Card {
+                        title: "GUIDED RUNTIME TEST";
+                        horizontal-stretch: 3;
+                        Text {
+                            text: "Measures the battery under your real load. Start with a full battery, then unplug the UPS from the wall socket and leave your equipment connected. UPS-BMC tells you when to plug it back in. Nothing is sent to the UPS.";
+                            color: Theme.muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Text {
+                                text: "Stop at";
+                                color: Theme.text;
+                                vertical-alignment: center;
+                            }
+                            ComboBox {
+                                width: 90px;
+                                model: ["80 %", "70 %", "60 %", "50 %", "40 %", "30 %"];
+                                current-index <=> root.test-stop-index;
+                                enabled: root.test-phase == 0;
+                            }
+                            if root.test-phase == 0: Button {
+                                text: "Start test";
+                                primary: true;
+                                clicked => {
+                                    root.start-runtime-test(root.test-stop-index);
+                                }
+                            }
+                            if root.test-phase != 0: Button {
+                                text: "Cancel test";
+                                clicked => {
+                                    root.cancel-runtime-test();
+                                }
+                            }
+                        }
+                        if root.test-text != "" || root.test-message != "": Text {
+                            text: root.test-text != "" ? root.test-text : root.test-message;
+                            color: root.test-phase == 3 ? Theme.red : root.test-phase == 2 ? Theme.amber : root.test-phase == 1 ? Theme.blue : Theme.text;
+                            font-size: 12px;
+                            font-weight: root.test-phase == 3 ? 700 : 400;
+                            wrap: word-wrap;
+                        }
+                    }
+                    Card {
+                        title: "BATTERY INSTALLED ON";
+                        horizontal-stretch: 2;
+                        Text {
+                            text: "Only discharges since this date are compared, so a new battery starts a fresh baseline.";
+                            color: Theme.muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            LineEdit {
+                                placeholder-text: "YYYY-MM-DD";
+                                text <=> root.installed-input;
+                            }
+                            Button {
+                                text: "Save";
+                                clicked => {
+                                    root.set-battery-installed(root.installed-input);
+                                }
+                            }
+                            Button {
+                                text: "Replaced today";
+                                clicked => {
+                                    root.battery-replaced-today();
+                                }
+                            }
+                        }
+                        if root.battery-message != "": Text {
+                            text: root.battery-message;
+                            color: Theme.amber;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                Text {
+                    text: root.health-summary;
+                    color: Theme.muted;
+                    font-size: 12px;
+                }
+                StandardTableView {
+                    vertical-stretch: 1;
+                    min-height: 90px;
+                    columns: [
+                        { title: "Started", min-width: 130px }, { title: "Duration" }, { title: "Charge" },
+                        { title: "Avg load" }, { title: "Full runtime" }, { title: "Capacity" },
+                        { title: "vs UPS estimate" }, { title: "vs baseline" }, { title: "Notes" },
+                    ];
+                    rows: root.discharge-rows;
                 }
             }
         }

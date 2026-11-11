@@ -229,10 +229,13 @@ fn records_outages_stats_and_reports() {
     assert!(outage.energy_wh.unwrap() > 0.0);
     assert!(outage.recharge_duration().unwrap() > chrono::Duration::zero());
 
-    let stats: ups_api::StatsResponse = get(&c, "/api/v1/stats").unwrap();
+    // Coverage is written every 10 s.
+    let stats = wait_for(Duration::from_secs(20), || {
+        get::<ups_api::StatsResponse>(&c, "/api/v1/stats")
+            .filter(|s| s.periods[0].on_battery_s > 0.0 && !s.months.is_empty())
+    });
     assert_eq!(stats.periods[0].label, "Today");
     assert!(stats.periods[0].outages >= 1);
-    assert!(stats.periods[0].on_battery_s > 0.0, "{stats:?}");
     let month = stats.months.first().cloned().expect("current month listed");
 
     let (code, html) = text(&c, &format!("/api/v1/report?month={month}&format=html"));
@@ -245,5 +248,97 @@ fn records_outages_stats_and_reports() {
     assert_eq!(
         text(&c, &format!("/api/v1/report?month={month}&format=pdf")).0,
         400
+    );
+}
+
+#[test]
+fn runs_a_guided_runtime_test_and_reports_health() {
+    // 30× simulator: a 10 s cycle, on mains and full for the first ~2 s.
+    let c = start_with(&["--sim-speed", "30"]);
+    wait_for(Duration::from_secs(20), || {
+        get::<StatusResponse>(&c, "/api/v1/status").filter(|s| s.snapshot.is_some())
+    });
+    // Browsers can't start a test.
+    let start = r#"{"action":"start","stop_at_pct":50}"#;
+    assert_eq!(
+        post(
+            &c,
+            "/api/v1/battery/test",
+            start,
+            Some("https://evil.example")
+        )
+        .0,
+        403
+    );
+    assert_eq!(
+        post(
+            &c,
+            "/api/v1/battery/test",
+            r#"{"action":"start","stop_at_pct":5}"#,
+            None
+        )
+        .0,
+        409
+    );
+    // Arming only works on mains with a full battery: retry until then.
+    wait_for(Duration::from_secs(30), || {
+        (post(&c, "/api/v1/battery/test", start, None).0 == 200).then_some(())
+    });
+    let status: StatusResponse = get(&c, "/api/v1/status").unwrap();
+    assert!(status.runtime_test.is_some());
+
+    // The simulated outage is the test: it is tagged, and the user is asked
+    // to restore power at 50 %.
+    let outage = wait_for(Duration::from_secs(30), || {
+        get::<ups_api::OutagesResponse>(&c, "/api/v1/outages?days=1")?
+            .outages
+            .into_iter()
+            .find(|o| o.runtime_test && o.end.is_some())
+    });
+    assert!(outage.charge_min_pct.unwrap() <= 50.0);
+    let events: EventsResponse = get(&c, "/api/v1/events?limit=50").unwrap();
+    let kinds: Vec<EventKind> = events.events.iter().map(|e| e.kind).collect();
+    assert!(
+        kinds.contains(&EventKind::RuntimeTestRestorePower),
+        "{kinds:?}"
+    );
+    assert!(
+        events
+            .events
+            .iter()
+            .any(|e| e.message.starts_with("Runtime test finished")),
+        "{events:?}"
+    );
+    let status: StatusResponse = get(&c, "/api/v1/status").unwrap();
+    assert!(status.runtime_test.is_none());
+    assert_eq!(
+        post(&c, "/api/v1/battery/test", r#"{"action":"cancel"}"#, None).0,
+        409
+    );
+
+    // Health: 3-second outages are too short to use, but the report works.
+    let health: ups_api::HealthReport = get(&c, "/api/v1/health").unwrap();
+    assert_eq!(health.verdict, ups_api::HealthVerdict::Unknown);
+    assert!(health.skipped >= 1);
+
+    // Battery date: future dates are refused; a past date is stored.
+    let (code, _) = post(
+        &c,
+        "/api/v1/settings/battery",
+        r#"{"installed":"2999-01-01"}"#,
+        None,
+    );
+    assert_eq!(code, 422);
+    let (code, body) = post(
+        &c,
+        "/api/v1/settings/battery",
+        r#"{"installed":"2024-03-15"}"#,
+        None,
+    );
+    assert_eq!(code, 200, "{body}");
+    let health: ups_api::HealthReport = get(&c, "/api/v1/health").unwrap();
+    assert_eq!(
+        health.battery_installed,
+        chrono::NaiveDate::from_ymd_opt(2024, 3, 15)
     );
 }

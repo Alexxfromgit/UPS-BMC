@@ -83,6 +83,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE outages ADD COLUMN battery_v_min REAL;
     ALTER TABLE outages ADD COLUMN power_estimated INTEGER NOT NULL DEFAULT 0;
 ",
+    r"
+    ALTER TABLE outages ADD COLUMN runtime_test INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 mod analysis;

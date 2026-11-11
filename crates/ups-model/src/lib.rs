@@ -7,6 +7,7 @@
 
 mod device;
 mod event;
+mod health;
 mod history;
 mod outage;
 mod snapshot;
@@ -15,6 +16,9 @@ pub mod vars;
 
 pub use device::DeviceInfo;
 pub use event::{Event, EventKind, Severity};
+pub use health::{
+    Confidence, Discharge, HealthReport, HealthVerdict, RuntimeTestPhase, RuntimeTestStatus,
+};
 pub use history::HistoryPoint;
 pub use outage::{DailyCoverage, Outage, PeriodStats};
 pub use snapshot::Snapshot;

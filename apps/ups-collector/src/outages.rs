@@ -108,6 +108,11 @@ impl OutageAnalysis {
         self.tracker.set_assumed_power(watts);
     }
 
+    /// While set, the ongoing outage is tagged as a guided runtime test.
+    pub fn set_testing(&mut self, testing: bool) {
+        self.tracker.set_testing(testing);
+    }
+
     /// Writes pending coverage increments.
     pub fn flush(&mut self, store: &mut Store) {
         self.last_flush = Instant::now();

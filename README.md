@@ -26,7 +26,7 @@ This protects the PC whether or not UPS-BMC is running.
 | M0 | Workspace, CI, ADRs, `hid-probe`, real-device capture | done |
 | M1 = V1 | Collector + SQLite + API, Slint dashboard, tray, toasts | done (incl. beeper setting, autostart, installer) |
 | M2 = V2 | Outage engine, outage history, statistics, monthly report (HTML/CSV) | done |
-| M3 = V3 | Load-normalised battery degradation estimate, guided runtime test | planned |
+| M3 = V3 | Load-normalised battery degradation estimate, guided runtime test ([ADR-0004](docs/adr/0004-battery-health-estimation.md)) | done |
 | M4 = V4 | NUT source, remote collector (Raspberry Pi, or NUT via Entware on a Keenetic router if it proves reliable), remote UI, ntfy/Telegram/email | planned |
 | M5 | More UPS settings: output voltage, thresholds (beeper already done in M1) ([ADR-0003](docs/adr/0003-ups-configuration-writes.md)) | proposed |
 
@@ -73,12 +73,31 @@ cargo build --release -p ups-collector -p ups-bmc
   Flapping power (mains back for under 5 s) counts as one outage. When the
   collector wasn't running, a start or end it didn't see is marked "not
   observed". Availability only counts monitored time.
+- **Battery health tab:** compares recent outages with the first ones
+  recorded for the battery. Each outage that uses at least 5 % of charge,
+  starting from 80 % or more, is extrapolated to a full-battery runtime and,
+  when the load is known, to a capacity in Wh. It shows a health percentage
+  with a confidence level, the expected runtime from a full battery, the
+  battery's age, the UPS's own "replace battery" flag, a trend chart and
+  every discharge used. See
+  [ADR-0004](docs/adr/0004-battery-health-estimation.md) for the method and
+  its limits.
+  - **Battery installed on:** enter the date, or click **Replaced today**
+    after fitting a new battery. Only discharges since then are compared.
+  - **Guided runtime test:** choose a stop level (default 50 %), click
+    **Start test**, then unplug the UPS from the wall socket. When the charge
+    reaches the stop level, a notification asks you to plug it back in. The
+    test is a normal outage tagged "runtime test"; UPS-BMC sends nothing to the
+    UPS. Your equipment runs on battery during the test.
 - **Reports tab:** pick a month to open an HTML report (summary, daily
   overview, outage table) or export a CSV. Both are saved to
   `Documents\UPS-BMC Reports`.
 - **Settings** (top right of the window):
   - **UPS beeper:** on/off. The change is verified by reading it back from the UPS.
   - **Start with Windows:** turns autostart at sign-in on or off.
+  - **Estimated load:** for loads too small for the UPS to measure (it reads
+    0 %), e.g. a router. It is used for outage energy and battery capacity,
+    always marked "≈".
 
 | Endpoint | Purpose |
 |---|---|
@@ -90,6 +109,10 @@ cargo build --release -p ups-collector -p ups-bmc
 | `GET /api/v1/outages?days=90` | recorded outages, newest first |
 | `GET /api/v1/stats` | today / 7 days / 30 days / this month, plus months with data |
 | `GET /api/v1/report?month=2026-11&format=html` | monthly report (`html` or `csv`) |
+| `POST /api/v1/settings/assumed-load` | `{"watts": 20}` or `{"watts": null}`: load estimate for loads below the UPS's range |
+| `GET /api/v1/health` | battery health report (verdict, confidence, discharges used) |
+| `POST /api/v1/settings/battery` | `{"installed": "2024-03-15"}`: battery installation date |
+| `POST /api/v1/battery/test` | `{"action": "start", "stop_at_pct": 50}` or `{"action": "cancel"}` |
 
 ## Workspace layout
 ```
@@ -98,9 +121,9 @@ crates/ups-hid       defensive HID report-descriptor parser + Power Device / Bat
 crates/ups-source    telemetry sources: HID (read-only, HID → NUT mapping), simulator
 crates/ups-store     SQLite storage (samples, events, device), WAL, retention
 crates/ups-api       collector API wire types (v1)
-crates/ups-analysis  outage tracker, daily coverage, period statistics, HTML/CSV reports (pure)
+crates/ups-analysis  outage tracker, daily coverage, statistics, reports, battery health, runtime test (pure)
 apps/ups-collector   headless collector: poller → ingest/events → SQLite, HTTP + WebSocket API
-apps/ups-bmc         Slint desktop UI: dashboard, charts, events, tray icon, notifications
+apps/ups-bmc         Slint desktop UI: dashboard, outages, battery health, reports, tray icon, notifications
 apps/hid-probe       read-only discovery tool for HID UPS devices
 docs/adr             architecture decision records
 docs/reviews         code review records and their resolution

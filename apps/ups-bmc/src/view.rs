@@ -55,6 +55,9 @@ pub struct View {
     pub beeper_text: String,
     /// Current load estimate for the Settings dialog ("20 W" or "not set").
     pub assumed_load_text: String,
+    /// Guided runtime test: 0 none, 1 armed, 2 running, 3 restore power.
+    pub test_phase: i32,
+    pub test_text: String,
 }
 
 /// One row of the events list.
@@ -248,6 +251,19 @@ pub fn build(status: &StatusResponse, history: &[HistoryPoint], now: DateTime<Ut
         (true, None) => "The UPS does not report the beeper state".to_owned(),
     };
 
+    let (test_phase, test_text) = crate::health_view::test_state(status.runtime_test.as_ref());
+    // While a test discharges the battery, say so in the banner.
+    let (status_title, status_detail) = match status.runtime_test.as_ref().map(|t| t.phase) {
+        Some(ups_api::RuntimeTestPhase::RestorePower) => (
+            "Runtime test done: plug the UPS back in".to_owned(),
+            test_text.clone(),
+        ),
+        Some(ups_api::RuntimeTestPhase::Running) => {
+            (format!("{status_title} (runtime test)"), test_text.clone())
+        }
+        _ => (status_title, status_detail),
+    };
+
     let charts = ChartData::build(history, now);
     let charge_text = charge.map_or_else(|| DASH.to_owned(), |c| format!("{c:.0}%"));
     let tooltip = match charge {
@@ -295,6 +311,8 @@ pub fn build(status: &StatusResponse, history: &[HistoryPoint], now: DateTime<Ut
         assumed_load_text: status
             .assumed_load_w
             .map_or_else(|| "not set".to_owned(), |w| format!("{w:.0} W")),
+        test_phase,
+        test_text,
     }
 }
 
@@ -542,6 +560,7 @@ mod tests {
             connection: Connection::Connected,
             capabilities: vec!["beeper".into()],
             assumed_load_w: None,
+            runtime_test: None,
             device: Some(DeviceInfo {
                 source: "hid".into(),
                 manufacturer: Some("EATON".into()),
@@ -801,6 +820,9 @@ pub fn outages_view(
         .map(|(i, o)| {
             let duration = format::duration(secs(o.duration(now)));
             let mut notes = Vec::new();
+            if o.runtime_test {
+                notes.push("runtime test");
+            }
             if !o.start_observed() {
                 notes.push("start not observed");
             }

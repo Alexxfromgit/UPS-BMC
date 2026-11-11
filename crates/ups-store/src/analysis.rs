@@ -9,7 +9,8 @@ use crate::{Result, Store, StoreError, from_ms, ms};
 
 const OUTAGE_COLUMNS: &str = "id, start_ms, start_earliest_ms, end_ms, end_latest_ms, \
      charge_start, charge_end, charge_min, runtime_est_start_s, avg_load_pct, avg_power_w, \
-     energy_wh, recharged_ms, battery_v_start, battery_v_end, battery_v_min, power_estimated";
+     energy_wh, recharged_ms, battery_v_start, battery_v_end, battery_v_min, power_estimated, \
+     runtime_test";
 
 fn outage_from_row(r: &Row<'_>) -> rusqlite::Result<Outage> {
     let t = |v: Option<i64>| v.map(from_ms);
@@ -31,6 +32,7 @@ fn outage_from_row(r: &Row<'_>) -> rusqlite::Result<Outage> {
         battery_v_end: r.get(14)?,
         battery_v_min: r.get(15)?,
         power_estimated: r.get(16)?,
+        runtime_test: r.get(17)?,
     })
 }
 
@@ -54,14 +56,15 @@ impl Store {
             o.battery_v_end,
             o.battery_v_min,
             o.power_estimated,
+            o.runtime_test,
         ];
         if o.id == 0 {
             self.conn.execute(
                 "INSERT INTO outages (start_ms, start_earliest_ms, end_ms, end_latest_ms,
                  charge_start, charge_end, charge_min, runtime_est_start_s, avg_load_pct,
                  avg_power_w, energy_wh, recharged_ms, battery_v_start, battery_v_end,
-                 battery_v_min, power_estimated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 battery_v_min, power_estimated, runtime_test)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 values,
             )?;
             Ok(self.conn.last_insert_rowid())
@@ -71,7 +74,7 @@ impl Store {
                  end_latest_ms = ?4, charge_start = ?5, charge_end = ?6, charge_min = ?7,
                  runtime_est_start_s = ?8, avg_load_pct = ?9, avg_power_w = ?10,
                  energy_wh = ?11, recharged_ms = ?12, battery_v_start = ?13, battery_v_end = ?14,
-                 battery_v_min = ?15, power_estimated = ?16 WHERE id = ?17",
+                 battery_v_min = ?15, power_estimated = ?16, runtime_test = ?17 WHERE id = ?18",
             )?;
             let mut p: Vec<&dyn rusqlite::ToSql> = values.to_vec();
             p.push(&o.id);
@@ -180,31 +183,44 @@ impl Store {
         Ok(out)
     }
 
+    fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    fn set_meta(&mut self, key: &str, value: Option<String>) -> Result<()> {
+        match value {
+            Some(v) => self.conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                [key, &v],
+            )?,
+            None => self
+                .conn
+                .execute("DELETE FROM meta WHERE key = ?1", [key])?,
+        };
+        Ok(())
+    }
+
     /// The user's estimate of the protected load (watts), if set.
     pub fn assumed_load_w(&self) -> Result<Option<f32>> {
-        let v: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'assumed_load_w'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(v.and_then(|v| v.parse().ok()))
+        Ok(self.meta("assumed_load_w")?.and_then(|v| v.parse().ok()))
     }
 
     /// Sets or clears the load estimate.
     pub fn set_assumed_load_w(&mut self, watts: Option<f32>) -> Result<()> {
-        match watts {
-            Some(w) => self.conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('assumed_load_w', ?1)",
-                [w.to_string()],
-            )?,
-            None => self
-                .conn
-                .execute("DELETE FROM meta WHERE key = 'assumed_load_w'", [])?,
-        };
-        Ok(())
+        self.set_meta("assumed_load_w", watts.map(|w| w.to_string()))
+    }
+
+    /// When the current battery was installed (user-provided), if known.
+    pub fn battery_installed(&self) -> Result<Option<NaiveDate>> {
+        Ok(self.meta("battery_installed")?.and_then(|v| v.parse().ok()))
+    }
+
+    /// Sets or clears the battery installation date.
+    pub fn set_battery_installed(&mut self, date: Option<NaiveDate>) -> Result<()> {
+        self.set_meta("battery_installed", date.map(|d| d.to_string()))
     }
 
     /// All stored daily coverage, oldest first.
@@ -275,6 +291,7 @@ mod tests {
         o.charge_start_pct = Some(100.0);
         o.battery_v_min = Some(12.4);
         o.power_estimated = true;
+        o.runtime_test = true;
         o.id = s.save_outage(&o).unwrap();
         assert_eq!(s.open_outage().unwrap(), Some(o.clone()));
 
@@ -315,6 +332,12 @@ mod tests {
         assert_eq!(s.assumed_load_w().unwrap(), Some(20.0));
         s.set_assumed_load_w(None).unwrap();
         assert_eq!(s.assumed_load_w().unwrap(), None);
+
+        assert_eq!(s.battery_installed().unwrap(), None);
+        s.set_battery_installed(Some(d)).unwrap();
+        assert_eq!(s.battery_installed().unwrap(), Some(d));
+        s.set_battery_installed(None).unwrap();
+        assert_eq!(s.battery_installed().unwrap(), None);
     }
 
     #[test]

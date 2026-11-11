@@ -20,15 +20,21 @@ pub enum EventKind {
     OverloadCleared,
     /// A UPS setting was changed from UPS-BMC (ADR-0003).
     SettingChanged,
+    /// Guided runtime test armed, started, finished or cancelled.
+    RuntimeTest,
+    /// Guided runtime test reached its stop level: restore mains power.
+    RuntimeTestRestorePower,
 }
 
 impl EventKind {
     #[must_use]
     pub fn severity(self) -> Severity {
         match self {
-            Self::PowerLost | Self::Overload | Self::ReplaceBattery | Self::CommunicationLost => {
-                Severity::Warning
-            }
+            Self::PowerLost
+            | Self::Overload
+            | Self::ReplaceBattery
+            | Self::CommunicationLost
+            | Self::RuntimeTestRestorePower => Severity::Warning,
             Self::LowBattery => Severity::Critical,
             _ => Severity::Info,
         }
@@ -49,6 +55,8 @@ impl EventKind {
             Self::Overload => "overload",
             Self::OverloadCleared => "overload_cleared",
             Self::SettingChanged => "setting_changed",
+            Self::RuntimeTest => "runtime_test",
+            Self::RuntimeTestRestorePower => "runtime_test_restore_power",
         }
     }
 
@@ -59,7 +67,7 @@ impl EventKind {
     }
 }
 
-const ALL: [EventKind; 12] = [
+const ALL: [EventKind; 14] = [
     EventKind::CollectorStarted,
     EventKind::CollectorStopped,
     EventKind::CommunicationLost,
@@ -72,6 +80,8 @@ const ALL: [EventKind; 12] = [
     EventKind::Overload,
     EventKind::OverloadCleared,
     EventKind::SettingChanged,
+    EventKind::RuntimeTest,
+    EventKind::RuntimeTestRestorePower,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

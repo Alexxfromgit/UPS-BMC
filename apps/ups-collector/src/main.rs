@@ -162,6 +162,7 @@ fn main() -> Result<()> {
         device: store.device().ok().flatten(),
         capabilities: Vec::new(),
         assumed_load_w: None,
+        runtime_test: None,
         snapshot: None,
     }));
     let (live, _) = broadcast::channel(256);

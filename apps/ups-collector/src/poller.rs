@@ -31,6 +31,16 @@ pub enum PollerMsg {
         watts: Option<f32>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// From the API: set or clear the battery installation date.
+    SetBatteryInstalled {
+        date: Option<chrono::NaiveDate>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// From the API: start or cancel a guided runtime test.
+    RuntimeTest {
+        request: ups_api::RuntimeTestRequest,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// Requests to the poller.

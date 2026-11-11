@@ -7,14 +7,19 @@
 //!   much of that was on battery. This is the basis for availability figures.
 //! * [`stats`]: period statistics (today, last 7/30 days, months).
 //! * [`report`]: monthly HTML and CSV reports.
+//! * [`health`]: battery health from recorded discharges (M3).
+//! * [`RuntimeTest`]: the guided runtime test (M3).
 //!
 //! [`Outage`]: ups_model::Outage
 
 mod coverage;
 pub mod format;
+pub mod health;
 pub mod report;
+mod runtime_test;
 pub mod stats;
 mod tracker;
 
 pub use coverage::CoverageTracker;
+pub use runtime_test::{RuntimeTest, TestNotice};
 pub use tracker::{OutageTracker, TrackerConfig};

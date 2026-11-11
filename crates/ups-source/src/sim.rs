@@ -5,6 +5,9 @@
 //! * **60–150 s** power outage: discharging, and low battery near the end;
 //! * **150–300 s** power restored, recharging.
 //!
+//! The battery "ages": each cycle drains 2 % faster than the one before, up
+//! to 10 % (so battery health estimation has a trend to show).
+//!
 //! The values look like the Eaton 5E 900 (900 VA / 480 W, 12 V lead-acid).
 
 use std::time::{Duration, Instant};
@@ -99,16 +102,20 @@ impl TelemetrySource for SimSource {
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // bounded values
 pub fn snapshot_at(elapsed: Duration, ts: DateTime<Utc>) -> Snapshot {
     let t = elapsed.as_secs_f64() % CYCLE.as_secs_f64();
+    let cycle = (elapsed.as_secs_f64() / CYCLE.as_secs_f64())
+        .floor()
+        .min(5.0);
+    let drain = 0.9 * (1.0 + 0.02 * cycle); // % per second on battery
     let wobble = (elapsed.as_secs_f64() / 7.0).sin();
     let load = 20.0 + 3.0 * wobble;
 
     let (on_battery, charge) = if t < OUTAGE_START {
         (false, 100.0)
     } else if t < OUTAGE_END {
-        (true, 100.0 - (t - OUTAGE_START) * 0.9)
+        (true, 100.0 - (t - OUTAGE_START) * drain)
     } else {
-        let low = 100.0 - (OUTAGE_END - OUTAGE_START) * 0.9;
-        (false, (low + (t - OUTAGE_END) * 0.54).min(100.0))
+        let low = 100.0 - (OUTAGE_END - OUTAGE_START) * drain;
+        (false, (low + (t - OUTAGE_END) * 0.7).min(100.0))
     };
     let charging = !on_battery && charge < 100.0;
 
@@ -127,8 +134,9 @@ pub fn snapshot_at(elapsed: Duration, ts: DateTime<Utc>) -> Snapshot {
     let mut s = Snapshot::empty(ts);
     s.status = Some(status);
     s.battery_charge_pct = Some(charge.round() as f32);
-    // Runtime estimate: about 30 min at 20 % load from full charge.
-    s.battery_runtime_s = Some((charge * 18.0 * (20.0 / load)).round() as u32);
+    // Runtime estimate of a new battery at this load (the simulated discharge
+    // is compressed: 0.9 %/s at about 20 % load).
+    s.battery_runtime_s = Some((charge / 0.9 * (20.0 / load)).round() as u32);
     s.battery_voltage_v = Some(if on_battery {
         12.9 - (100.0 - charge) * 0.012
     } else if charging {
@@ -186,7 +194,9 @@ mod tests {
         let recharge = at(200);
         assert_eq!(recharge.status, Some(UpsStatus::OL | UpsStatus::CHRG));
 
-        // The cycle repeats.
+        // The cycle repeats, with an aging battery.
         assert_eq!(at(310).status, online.status);
+        assert_eq!(at(150).battery_charge_pct, Some(19.0));
+        assert_eq!(at(1650).battery_charge_pct, Some(11.0));
     }
 }

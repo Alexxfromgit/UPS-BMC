@@ -70,6 +70,8 @@ pub struct OutageTracker {
     /// The user's estimate of the protected load, used when the UPS reports
     /// no measurable power (0 W / 0 %).
     assumed_power_w: Option<f32>,
+    /// A guided runtime test is discharging the battery.
+    testing: bool,
 }
 
 impl OutageTracker {
@@ -81,6 +83,7 @@ impl OutageTracker {
             recharging: None,
             last: None,
             assumed_power_w: None,
+            testing: false,
         }
     }
 
@@ -114,6 +117,11 @@ impl OutageTracker {
     /// Sets (or clears) the assumed load used when the UPS measures 0.
     pub fn set_assumed_power(&mut self, watts: Option<f32>) {
         self.assumed_power_w = watts.filter(|w| *w > 0.0);
+    }
+
+    /// While set, the ongoing outage is tagged as a runtime test.
+    pub fn set_testing(&mut self, testing: bool) {
+        self.testing = testing;
     }
 
     /// The ongoing outage, if any.
@@ -152,6 +160,7 @@ impl OutageTracker {
                 Duration::zero()
             };
             if let Some((o, sums)) = self.open.as_mut() {
+                o.runtime_test |= self.testing;
                 accumulate(o, sums, s, step, self.assumed_power_w);
                 changed.push(o.clone());
             }
@@ -457,5 +466,18 @@ mod estimate_tests {
         let o = &plain.feed(&snap(0, true, 12.9))[0];
         assert!(!o.power_estimated);
         assert_eq!(o.avg_power_w, Some(0.0));
+    }
+
+    #[test]
+    fn tags_runtime_tests() {
+        let mut tr = OutageTracker::new(TrackerConfig::default());
+        assert!(!tr.feed(&snap(0, true, 12.9))[0].runtime_test);
+        tr.set_testing(true);
+        assert!(tr.feed(&snap(1, true, 12.8))[0].runtime_test);
+        tr.set_testing(false);
+        assert!(
+            tr.feed(&snap(2, true, 12.7))[0].runtime_test,
+            "stays tagged"
+        );
     }
 }

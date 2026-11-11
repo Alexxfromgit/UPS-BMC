@@ -54,6 +54,9 @@ fn notes(o: &Outage) -> String {
     if o.is_ongoing() {
         n.push("ongoing".to_owned());
     }
+    if o.runtime_test {
+        n.push("guided runtime test (unplugged on purpose)".to_owned());
+    }
     if !o.start_observed() {
         n.push("start not observed (monitoring gap)".to_owned());
     }

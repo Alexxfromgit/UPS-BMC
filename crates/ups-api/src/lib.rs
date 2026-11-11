@@ -11,14 +11,18 @@
 //! | GET | `/api/v1/outages?days=90&limit=500` | [`OutagesResponse`] |
 //! | GET | `/api/v1/stats` | [`StatsResponse`] |
 //! | GET | `/api/v1/report?month=2026-11&format=html` (or `csv`) | report document |
+//! | GET | `/api/v1/health` | [`HealthReport`] |
+//! | POST | `/api/v1/settings/battery` with [`BatteryRequest`] | [`SettingResponse`] |
+//! | POST | `/api/v1/battery/test` with [`RuntimeTestRequest`] | [`SettingResponse`] |
 //!
 //! The collector binds to `127.0.0.1:47800` by default (see ADR-0002).
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 pub use ups_model::{
-    DailyCoverage, DeviceInfo, Event, EventKind, HistoryPoint, Outage, PeriodStats, Severity,
-    Snapshot, UpsStatus, vars,
+    Confidence, DailyCoverage, DeviceInfo, Discharge, Event, EventKind, HealthReport,
+    HealthVerdict, HistoryPoint, Outage, PeriodStats, RuntimeTestPhase, RuntimeTestStatus,
+    Severity, Snapshot, UpsStatus, vars,
 };
 
 /// Default collector port.
@@ -55,6 +59,9 @@ pub struct StatusResponse {
     /// 0 (below its measuring range).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assumed_load_w: Option<f32>,
+    /// The guided runtime test in progress, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_test: Option<RuntimeTestStatus>,
     /// Latest reading. Stale when `connection` is not `Connected`.
     pub snapshot: Option<Snapshot>,
 }
@@ -99,6 +106,26 @@ pub struct AssumedLoadRequest {
     pub watts: Option<f32>,
 }
 
+/// Body of `POST /api/v1/settings/battery`: when the current battery was
+/// installed (`YYYY-MM-DD`), or null if unknown. Health estimation only uses
+/// outages since this date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatteryRequest {
+    pub installed: Option<NaiveDate>,
+}
+
+/// Body of `POST /api/v1/battery/test`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum RuntimeTestRequest {
+    /// Arm a test; the user then unplugs the UPS. UPS-BMC asks for mains
+    /// power to be restored when the charge reaches `stop_at_pct` (20–90).
+    Start {
+        stop_at_pct: f32,
+    },
+    Cancel,
+}
+
 /// Result of a setting change. Errors use HTTP status codes with a text body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingResponse {
@@ -134,6 +161,7 @@ mod tests {
             device: None,
             capabilities: Vec::new(),
             assumed_load_w: None,
+            runtime_test: None,
             snapshot: None,
         };
         let json = serde_json::to_string(&LiveMessage::Status(Box::new(status.clone()))).unwrap();
@@ -145,5 +173,15 @@ mod tests {
         let event = Event::new(DateTime::default(), EventKind::PowerLost, "x");
         let json = serde_json::to_string(&LiveMessage::Event(event)).unwrap();
         assert!(json.starts_with(r#"{"type":"event","#), "{json}");
+    }
+
+    #[test]
+    fn runtime_test_requests_are_tagged() {
+        let json = serde_json::to_string(&RuntimeTestRequest::Start { stop_at_pct: 50.0 }).unwrap();
+        assert_eq!(json, r#"{"action":"start","stop_at_pct":50.0}"#);
+        let back: RuntimeTestRequest = serde_json::from_str(r#"{"action":"cancel"}"#).unwrap();
+        assert_eq!(back, RuntimeTestRequest::Cancel);
+        let b: BatteryRequest = serde_json::from_str(r#"{"installed":"2024-03-15"}"#).unwrap();
+        assert_eq!(b.installed, NaiveDate::from_ymd_opt(2024, 3, 15));
     }
 }
