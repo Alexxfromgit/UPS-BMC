@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # Cargo (workspace Cargo.toml / Cargo.lock)
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # "deps: bump …" PR titles: Release Please lists them and cuts a patch release.
+    commit-message:
+      prefix: deps
+    groups:
+      slint:
+        patterns: ["slint*", "i-slint*"]
+      web:
+        patterns: ["axum*", "tokio*", "tower*", "hyper*", "ureq*", "tungstenite*"]
+      serde:
+        patterns: ["serde*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # "ci: bump …": workflow updates do not need a release.
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]

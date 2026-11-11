@@ -1,12 +1,55 @@
 # UPS-BMC — UPS & Battery Monitoring Center
 
-Monitoring, outage analysis and battery-health estimation for home UPS units.
-Built in Rust and Slint. The reference device is the Eaton 5E Gen2 900VA USB (5E900UD).
+[![CI](https://github.com/Alexxfromgit/UPS-BMC/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexxfromgit/UPS-BMC/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Alexxfromgit/UPS-BMC?sort=semver)](https://github.com/Alexxfromgit/UPS-BMC/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Monitoring, outage analysis and battery-health estimation for home UPS units on Windows, built in
+Rust and Slint. It reads a USB UPS through Windows' own HID driver, so nothing has to be installed
+or replaced, and Windows keeps its built-in UPS shutdown protection.
+
+<p align="center">
+  <img src="docs/images/dashboard.png" alt="UPS-BMC dashboard" width="49%">
+  <img src="docs/images/battery-health.png" alt="UPS-BMC battery health" width="49%">
+</p>
+
+- **Live dashboard:** charge, runtime, load, input/output and battery voltage every second, with
+  charts, an event log, a tray icon and Windows notifications for power loss, low battery and
+  restore.
+- **Outages:** every outage with duration, battery used, energy and recharge time; statistics for
+  today, 7 and 30 days and the month; monthly HTML and CSV reports.
+- **Battery health:** an estimate of how much capacity the battery has lost, from its own
+  discharges, with a guided runtime test ([ADR-0004](docs/adr/0004-battery-health-estimation.md)).
+- **Small loads:** many UPSes read 0 % for a router or a laptop charger; you can enter an estimate
+  instead.
 
 > **Read-only by design.** UPS-BMC sends nothing to the UPS except the settings
 > you change on purpose in **Settings**. Today that is only the beeper
 > ([ADR-0001](docs/adr/0001-data-source.md), [ADR-0003](docs/adr/0003-ups-configuration-writes.md)). Shutdown protection is handled by
 > Windows Power Options (or by NUT on the Pi), not by this app.
+
+## Download
+
+Get the latest version from [Releases](https://github.com/Alexxfromgit/UPS-BMC/releases/latest):
+
+| File | What it is |
+|---|---|
+| `UPS-BMC-setup-<version>.exe` | Per-user installer for Windows 10/11 (x64); no administrator rights needed |
+| `UPS-BMC-<version>-win-x64-portable.zip` | The same programs without installing |
+| `SHA256SUMS.txt` | Checksums of the files |
+
+The installer is not code-signed yet, so Windows SmartScreen may warn about it (*More info* →
+*Run anyway*). Every download has a signed build provenance; check it with
+`gh attestation verify <file> -R Alexxfromgit/UPS-BMC`.
+
+## Supported UPS models
+
+UPS-BMC works with UPSes that connect over USB as a standard **HID Power Device**, which is how most
+small UPSes from Eaton, APC, CyberPower and others appear to Windows (as a battery under
+Power Options). It is developed and tested with the **Eaton 5E Gen2 900VA USB (5E900UD)**; other
+models should work for monitoring. If yours doesn't, or shows odd values, please open an issue with
+a [`hid-probe`](#probing-a-ups) capture. The beeper setting is only offered where it can be changed
+safely.
 
 ## Before you start: enable shutdown protection
 Control Panel → Power Options → Change plan settings → Change advanced power
@@ -27,7 +70,7 @@ This protects the PC whether or not UPS-BMC is running.
 | M1 = V1 | Collector + SQLite + API, Slint dashboard, tray, toasts | done (incl. beeper setting, autostart, installer) |
 | M2 = V2 | Outage engine, outage history, statistics, monthly report (HTML/CSV) | done |
 | M3 = V3 | Load-normalised battery degradation estimate, guided runtime test ([ADR-0004](docs/adr/0004-battery-health-estimation.md)) | done |
-| M4 = V4 | NUT source, remote collector (Raspberry Pi, or NUT via Entware on a Keenetic router if it proves reliable), remote UI, ntfy/Telegram/email | planned |
+| M4 = V4 | NUT source, remote collector (Raspberry Pi, or NUT via Entware on a router if it proves reliable), remote UI, ntfy/Telegram/email | planned |
 | M5 | More UPS settings: output voltage, thresholds (beeper already done in M1) ([ADR-0003](docs/adr/0003-ups-configuration-writes.md)) | proposed |
 
 **Polling:** each feature report takes about 44 ms on the 5E (USB control
@@ -37,6 +80,8 @@ charge/runtime, load/battery voltage, input/output, boost/buck) every
 configuration) are read every 60 s.
 
 ## Installing
+Run the installer from [Releases](https://github.com/Alexxfromgit/UPS-BMC/releases/latest), or
+build it yourself:
 ```bash
 .\installer\build.ps1
 ```
@@ -137,8 +182,6 @@ docs/reviews         code review records and their resolution
 fixtures             curated real-device captures for tests
 ```
 
-UPS-BMC uses [Slint](https://slint.dev) under the Slint Royalty-free Desktop
-License 2.0. The required attribution is in the About dialog.
 
 ## Development
 **Toolchain:** Rust 1.99, pinned in `rust-toolchain.toml` (rustup installs it
@@ -189,3 +232,21 @@ descriptor, every feature report, and any input reports received during the
 is saved before listening starts, so pressing Ctrl-C keeps what was already
 read. If the UPS doesn't appear as a power device, use `--list-all` and pass
 `--vid/--pid`.
+
+## Contributing
+
+Bug reports, ideas, captures from other UPS models and pull requests are welcome; see
+[CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately as described in
+[SECURITY.md](SECURITY.md). Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+UPS-BMC is released under the [MIT License](LICENSE).
+
+It uses [Slint](https://slint.dev) under the Slint Royalty-free Desktop License 2.0; the required
+attribution is in the About dialog. Third-party crates are under their own licenses (checked by
+`cargo deny`, see `deny.toml`).
+
+UPS-BMC is an independent project, not affiliated with or endorsed by Eaton or any other UPS
+maker. Product names are trademarks of their owners. It comes without warranty: keep your
+operating system's own UPS shutdown protection enabled.

@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Unplug the UPS from the wall socket
+        2. Open the Outages tab
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: UPS-BMC version
+      description: Shown under About.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: ups
+    attributes:
+      label: UPS model and firmware
+      placeholder: Eaton 5E 900 Gen2 (5E900UD), firmware 01.02.0009
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows 11, Windows 10, Linux, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Anything else?
+      description: >
+        Screenshots, error messages, the relevant part of the collector log
+        (%LOCALAPPDATA%\UPS-BMC\data\logs). For UPS data problems, a `hid-probe --redact-serial`
+        capture helps a lot. Please remove anything personal.

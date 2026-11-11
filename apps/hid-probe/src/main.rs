@@ -205,6 +205,17 @@ fn probe_and_save(api: &HidApi, info: &DeviceInfo, index: usize, args: &Args) ->
     Ok(())
 }
 
+/// Keeps only the vendor/product part of an OS device path. On Windows the
+/// instance part (`HID#VID_0463&PID_FFFF#<instance>#{guid}`) can contain the
+/// USB serial number, so it is removed along with the serial.
+fn redact_path(path: &str) -> String {
+    let mut parts = path.splitn(3, '#');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(prefix), Some(ids), Some(_)) => format!("{prefix}#{ids}#<redacted>"),
+        _ => "<redacted>".to_owned(),
+    }
+}
+
 fn new_dump(info: &DeviceInfo, redact_serial: bool) -> DeviceDump {
     DeviceDump {
         tool: env!("CARGO_PKG_NAME"),
@@ -227,7 +238,14 @@ fn new_dump(info: &DeviceInfo, redact_serial: bool) -> DeviceDump {
             usage_page: info.usage_page(),
             usage: info.usage(),
             interface_number: info.interface_number(),
-            path: info.path().to_string_lossy().into_owned(),
+            path: {
+                let path = info.path().to_string_lossy().into_owned();
+                if redact_serial {
+                    redact_path(&path)
+                } else {
+                    path
+                }
+            },
         },
         open_error: None,
         report_descriptor_hex: None,
@@ -522,6 +540,17 @@ mod tests {
         assert!(parse_hex_u16("").is_err());
         assert!(parse_hex_u16("0x").is_err());
         assert!(parse_hex_u16("10000").is_err());
+    }
+
+    #[test]
+    fn redacts_device_paths() {
+        assert_eq!(
+            redact_path(
+                r"\\?\HID#VID_0463&PID_FFFF#6&dc9092&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+            ),
+            r"\\?\HID#VID_0463&PID_FFFF#<redacted>"
+        );
+        assert_eq!(redact_path("/dev/hidraw0"), "<redacted>");
     }
 
     #[test]

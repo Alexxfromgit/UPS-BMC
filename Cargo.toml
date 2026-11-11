@@ -16,7 +16,9 @@ members = [
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-authors = ["UPS-BMC contributors"]
+authors = ["Alexander Rubtsov"]
+license = "MIT"
+repository = "https://github.com/Alexxfromgit/UPS-BMC"
 publish = false
 
 [workspace.dependencies]

@@ -20,7 +20,9 @@ AppId={{E75643C4-5C89-4DF7-8010-07E1E0A9B2D7}
 AppName=UPS-BMC
 AppVersion={#AppVersion}
 AppVerName=UPS-BMC {#AppVersion}
-AppPublisher=UPS-BMC
+AppPublisher=Alexander Rubtsov
+AppPublisherURL=https://github.com/Alexxfromgit/UPS-BMC
+AppSupportURL=https://github.com/Alexxfromgit/UPS-BMC/issues
 AppComments=UPS & Battery Monitoring Center
 DefaultDirName={autopf}\UPS-BMC
 DisableProgramGroupPage=yes
@@ -46,6 +48,7 @@ Source: "..\target\release\ups-bmc.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\ups-collector.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\hid-probe.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\UPS-BMC"; Filename: "{app}\{#AppExe}"; Comment: "UPS & Battery Monitoring Center"; AppUserModelID: "{#AppUserModelId}"

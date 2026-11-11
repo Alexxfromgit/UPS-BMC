@@ -14,3 +14,13 @@
 /*.sqlite
 /*.sqlite-*
 /*.db
+
+# Logs and local tool/assistant settings
+*.log
+.claude/*.local.*
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
