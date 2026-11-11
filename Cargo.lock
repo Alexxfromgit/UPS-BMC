@@ -5626,6 +5626,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
 
 [[package]]
+name = "ups-analysis"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ups-model",
+]
+
+[[package]]
 name = "ups-api"
 version = "0.1.0"
 dependencies = [
@@ -5642,12 +5650,14 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "directories",
  "notify-rust",
  "serde",
  "serde_json",
  "slint",
  "slint-build",
  "tungstenite 0.30.0",
+ "ups-analysis",
  "ups-api",
  "ureq",
  "winreg",
@@ -5670,6 +5680,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tungstenite 0.30.0",
+ "ups-analysis",
  "ups-api",
  "ups-model",
  "ups-source",

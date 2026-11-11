@@ -14,6 +14,7 @@ use ups_model::{Event, EventKind};
 use ups_store::Store;
 
 use crate::detector::EventDetector;
+use crate::outages::OutageAnalysis;
 use crate::poller::PollerMsg;
 
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
@@ -34,6 +35,7 @@ impl Ingest {
 
     fn run(mut self, rx: &Receiver<PollerMsg>) {
         let mut detector = EventDetector::default();
+        let mut analysis = OutageAnalysis::start(&mut self.store);
         let mut last_prune: Option<Instant> = None;
         self.record(Event::new(
             Utc::now(),
@@ -76,6 +78,9 @@ impl Ingest {
                         error!(error = %e, "could not store sample");
                     }
                     let events = detector.on_snapshot(&snapshot);
+                    for outage in analysis.on_snapshot(&mut self.store, &snapshot) {
+                        let _ = self.live.send(LiveMessage::Outage(outage));
+                    }
                     self.update(|s| s.snapshot = Some(snapshot));
                     events
                 }
@@ -93,6 +98,7 @@ impl Ingest {
             }
         }
 
+        analysis.flush(&mut self.store);
         self.record(Event::new(
             Utc::now(),
             EventKind::CollectorStopped,

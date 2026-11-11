@@ -8,6 +8,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+ups-analysis.workspace = true
 ups-api.workspace = true
 ups-model.workspace = true
 ups-source.workspace = true

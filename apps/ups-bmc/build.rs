@@ -1,5 +1,7 @@
 fn main() {
-    slint_build::compile("ui/app.slint").expect("Slint UI failed to compile");
+    // Dark Fluent widgets match the app's dark theme on every OS setting.
+    let config = slint_build::CompilerConfiguration::new().with_style("fluent-dark".into());
+    slint_build::compile_with_config("ui/app.slint", config).expect("Slint UI failed to compile");
 
     // Executable icon and version info on Windows.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {

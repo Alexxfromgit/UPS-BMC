@@ -24,7 +24,8 @@ pub enum StoreError {
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// Schema migrations. Index + 1 is the `user_version` after applying.
-const MIGRATIONS: &[&str] = &[r"
+const MIGRATIONS: &[&str] = &[
+    r"
     CREATE TABLE samples (
         ts_ms       INTEGER PRIMARY KEY,
         status      TEXT,
@@ -52,7 +53,33 @@ const MIGRATIONS: &[&str] = &[r"
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
-"];
+",
+    r"
+    CREATE TABLE outages (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        start_ms            INTEGER NOT NULL,
+        start_earliest_ms   INTEGER,
+        end_ms              INTEGER,
+        end_latest_ms       INTEGER,
+        charge_start        REAL,
+        charge_end          REAL,
+        charge_min          REAL,
+        runtime_est_start_s INTEGER,
+        avg_load_pct        REAL,
+        avg_power_w         REAL,
+        energy_wh           REAL,
+        recharged_ms        INTEGER
+    );
+    CREATE INDEX outages_start ON outages (start_ms);
+    CREATE TABLE daily (
+        day          TEXT PRIMARY KEY,
+        monitored_s  REAL NOT NULL DEFAULT 0,
+        on_battery_s REAL NOT NULL DEFAULT 0
+    );
+",
+];
+
+mod analysis;
 
 const META_DEVICE: &str = "device";
 

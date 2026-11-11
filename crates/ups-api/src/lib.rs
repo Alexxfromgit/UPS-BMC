@@ -7,13 +7,17 @@
 //! | GET | `/api/v1/events?limit=50` | [`EventsResponse`] |
 //! | GET (WebSocket) | `/api/v1/live` | stream of [`LiveMessage`] (JSON text frames) |
 //! | POST | `/api/v1/settings/beeper` with [`BeeperRequest`] | [`SettingResponse`] |
+//! | GET | `/api/v1/outages?days=90&limit=500` | [`OutagesResponse`] |
+//! | GET | `/api/v1/stats` | [`StatsResponse`] |
+//! | GET | `/api/v1/report?month=2026-11&format=html` (or `csv`) | report document |
 //!
 //! The collector binds to `127.0.0.1:47800` by default (see ADR-0002).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 pub use ups_model::{
-    DeviceInfo, Event, EventKind, HistoryPoint, Severity, Snapshot, UpsStatus, vars,
+    DailyCoverage, DeviceInfo, Event, EventKind, HistoryPoint, Outage, PeriodStats, Severity,
+    Snapshot, UpsStatus, vars,
 };
 
 /// Default collector port.
@@ -63,6 +67,21 @@ pub struct EventsResponse {
     pub events: Vec<Event>,
 }
 
+/// Recorded outages, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutagesResponse {
+    pub outages: Vec<Outage>,
+}
+
+/// Outage statistics for standard periods, and the months with data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatsResponse {
+    /// Today, last 7 days, last 30 days, this month.
+    pub periods: Vec<PeriodStats>,
+    /// `YYYY-MM` months with monitoring data, newest first.
+    pub months: Vec<String>,
+}
+
 /// Body of `POST /api/v1/settings/beeper`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeeperRequest {
@@ -83,6 +102,8 @@ pub struct SettingResponse {
 pub enum LiveMessage {
     Status(Box<StatusResponse>),
     Event(Event),
+    /// An outage started, changed (every poll while ongoing) or ended.
+    Outage(Outage),
 }
 
 #[cfg(test)]

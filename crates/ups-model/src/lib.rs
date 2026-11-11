@@ -8,6 +8,7 @@
 mod device;
 mod event;
 mod history;
+mod outage;
 mod snapshot;
 mod status;
 pub mod vars;
@@ -15,5 +16,6 @@ pub mod vars;
 pub use device::DeviceInfo;
 pub use event::{Event, EventKind, Severity};
 pub use history::HistoryPoint;
+pub use outage::{DailyCoverage, Outage, PeriodStats};
 pub use snapshot::Snapshot;
 pub use status::UpsStatus;

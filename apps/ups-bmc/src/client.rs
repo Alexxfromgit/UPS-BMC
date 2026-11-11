@@ -2,13 +2,16 @@
 //! the live WebSocket. Results are handed to the UI thread as plain data.
 
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tungstenite::stream::MaybeTlsStream;
-use ups_api::{Event, EventsResponse, HistoryPoint, HistoryResponse, LiveMessage, StatusResponse};
+use ups_api::{
+    Event, EventsResponse, HistoryPoint, HistoryResponse, LiveMessage, Outage, OutagesResponse,
+    StatsResponse, StatusResponse,
+};
 
-use crate::view::{self, CHART_WINDOW, EventLine, View};
+use crate::view::{self, CHART_WINDOW, EventLine, OutagesView, View};
 
 /// What the client thread reports to the UI.
 #[derive(Debug)]
@@ -17,6 +20,7 @@ pub enum Update {
     Events(Vec<EventLine>),
     /// A live event worth a desktop notification.
     Notify(Event),
+    Outages(Box<OutagesView>),
 }
 
 /// Configuration of the client thread.
@@ -33,6 +37,10 @@ pub struct ClientConfig {
 const RETRY: Duration = Duration::from_secs(2);
 const HISTORY_POINTS: usize = 900; // one point per second over 15 minutes
 const MAX_EVENTS: usize = 50;
+/// Outage history shown in the UI.
+const OUTAGE_DAYS: u32 = 90;
+/// Statistics are refreshed at least this often (and after each outage change).
+const STATS_EVERY: Duration = Duration::from_secs(60);
 
 pub fn spawn(
     config: ClientConfig,
@@ -100,9 +108,11 @@ fn run(config: &ClientConfig, send: &dyn Fn(Update)) {
             Utc::now(),
         ))));
         send(Update::Events(view::event_lines(&events, Utc::now())));
+        let mut outages = Outages::fetch(config);
+        outages.send(send);
 
         // 3. Live updates until the connection drops.
-        if let Err(e) = live(config, send, &mut history, &mut events) {
+        if let Err(e) = live(config, send, &mut history, &mut events, &mut outages) {
             send(Update::View(Box::new(view::collector_offline(
                 &format!("Lost the connection to the collector ({e}). Reconnecting…"),
                 false,
@@ -117,6 +127,7 @@ fn live(
     send: &dyn Fn(Update),
     history: &mut Vec<HistoryPoint>,
     events: &mut Vec<Event>,
+    outages: &mut Outages,
 ) -> Result<(), String> {
     let (mut ws, _) = tungstenite::connect(format!("ws://{}/api/v1/live", config.address))
         .map_err(|e| e.to_string())?;
@@ -139,6 +150,20 @@ fn live(
                 let now = Utc::now();
                 history.retain(|p| now - p.ts <= CHART_WINDOW);
                 send(Update::View(Box::new(view::build(&status, history, now))));
+                // Ongoing outages tick; stats refresh periodically.
+                if outages.stats_due() {
+                    outages.refresh_stats(config);
+                    outages.send(send);
+                } else if outages.any_ongoing() {
+                    outages.send(send);
+                }
+            }
+            Ok(LiveMessage::Outage(outage)) => {
+                let new_or_ended = outages.upsert(outage);
+                if new_or_ended {
+                    outages.refresh_stats(config);
+                }
+                outages.send(send);
             }
             Ok(LiveMessage::Event(event)) => {
                 events.insert(0, event.clone());
@@ -174,4 +199,83 @@ pub fn set_beeper(address: &str, enabled: bool) -> Result<String, String> {
             body
         })
     }
+}
+
+/// Outage list and statistics as last fetched from the collector.
+#[derive(Debug, Default)]
+struct Outages {
+    list: Vec<Outage>,
+    stats: Option<StatsResponse>,
+    stats_at: Option<Instant>,
+}
+
+impl Outages {
+    fn fetch(config: &ClientConfig) -> Self {
+        let list = http::<OutagesResponse>(config, &format!("/api/v1/outages?days={OUTAGE_DAYS}"))
+            .map(|r| r.outages)
+            .unwrap_or_default();
+        let mut me = Self {
+            list,
+            ..Self::default()
+        };
+        me.refresh_stats(config);
+        me
+    }
+
+    fn refresh_stats(&mut self, config: &ClientConfig) {
+        self.stats_at = Some(Instant::now());
+        if let Ok(s) = http::<StatsResponse>(config, "/api/v1/stats") {
+            self.stats = Some(s);
+        }
+    }
+
+    fn stats_due(&self) -> bool {
+        self.stats_at.is_none_or(|t| t.elapsed() >= STATS_EVERY)
+    }
+
+    fn any_ongoing(&self) -> bool {
+        self.list.iter().any(Outage::is_ongoing)
+    }
+
+    /// Inserts or replaces an outage. Returns true if it is new or has just ended.
+    fn upsert(&mut self, outage: Outage) -> bool {
+        if let Some(existing) = self.list.iter_mut().find(|o| o.id == outage.id) {
+            let ended = existing.end.is_none() && outage.end.is_some();
+            *existing = outage;
+            ended
+        } else {
+            self.list.insert(0, outage);
+            true
+        }
+    }
+
+    fn send(&self, send: &dyn Fn(Update)) {
+        send(Update::Outages(Box::new(view::outages_view(
+            &self.list,
+            self.stats.as_ref(),
+            Utc::now(),
+        ))));
+    }
+}
+
+/// Downloads a monthly report (`month` = `YYYY-MM`) as text.
+pub fn fetch_report(address: &str, month: &str, csv: bool) -> Result<String, String> {
+    let format = if csv { "csv" } else { "html" };
+    let mut response = ureq::get(format!(
+        "http://{address}/api/v1/report?month={month}&format={format}"
+    ))
+    .config()
+    .timeout_global(Some(Duration::from_secs(30)))
+    .http_status_as_error(false)
+    .build()
+    .call()
+    .map_err(|e| e.to_string())?;
+    let ok = response.status().is_success();
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(64 * 1024 * 1024)
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
+    if ok { Ok(body) } else { Err(body) }
 }

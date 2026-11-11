@@ -672,3 +672,205 @@ mod tests {
         assert_eq!(lines[0].time.len(), 8);
     }
 }
+
+/// One statistics card on the Outages tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatCard {
+    pub title: String,
+    pub outages: String,
+    pub on_battery: String,
+    pub availability: String,
+    pub coverage: String,
+}
+
+/// Everything on the Outages and Reports tabs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutagesView {
+    pub cards: Vec<StatCard>,
+    /// Table rows, one cell per column of the outage table in `ui/app.slint`.
+    pub rows: Vec<Vec<String>>,
+    pub summary: String,
+    /// `YYYY-MM` keys and their labels (`November 2026`), newest first.
+    pub months: Vec<String>,
+    pub month_labels: Vec<String>,
+}
+
+/// Column titles of the outage table (must match `ui/app.slint`).
+#[cfg(test)]
+const OUTAGE_COLUMNS: [&str; 9] = [
+    "Started",
+    "Duration",
+    "Battery",
+    "Lowest",
+    "UPS estimate",
+    "Avg load",
+    "Energy",
+    "Recharge",
+    "Notes",
+];
+
+/// Rows shown in the table (the API returns up to 500).
+const MAX_ROWS: usize = 200;
+
+#[allow(clippy::cast_precision_loss)] // durations far below 2^52 ms
+fn secs(d: chrono::Duration) -> f64 {
+    d.num_milliseconds() as f64 / 1000.0
+}
+
+/// Builds the Outages/Reports view (pure).
+pub fn outages_view(
+    outages: &[ups_api::Outage],
+    stats: Option<&ups_api::StatsResponse>,
+    now: DateTime<Utc>,
+) -> OutagesView {
+    use ups_analysis::format;
+
+    let cards = stats
+        .map(|s| {
+            s.periods
+                .iter()
+                .map(|p| StatCard {
+                    title: p.label.clone(),
+                    outages: match p.outages {
+                        0 => "No outages".to_owned(),
+                        1 => "1 outage".to_owned(),
+                        n => format!("{n} outages"),
+                    },
+                    on_battery: format!("On battery: {}", format::duration(p.on_battery_s)),
+                    availability: format!(
+                        "Mains availability: {}",
+                        format::percent(p.availability_pct)
+                    ),
+                    coverage: format!("Monitored: {}", format::percent(Some(p.coverage_pct))),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let dash = || DASH.to_owned();
+    let rows = outages
+        .iter()
+        .take(MAX_ROWS)
+        .enumerate()
+        .map(|(i, o)| {
+            let duration = format::duration(secs(o.duration(now)));
+            let mut notes = Vec::new();
+            if !o.start_observed() {
+                notes.push("start not observed");
+            }
+            if !o.end_observed() {
+                notes.push("end not observed");
+            }
+            vec![
+                o.start
+                    .with_timezone(&Local)
+                    .format("%d.%m.%Y %H:%M:%S")
+                    .to_string(),
+                if o.is_ongoing() {
+                    format!("ongoing · {duration}")
+                } else {
+                    duration
+                },
+                match (o.charge_start_pct, o.charge_end_pct) {
+                    (Some(a), Some(b)) => format!("{a:.0} → {b:.0} %"),
+                    _ => dash(),
+                },
+                o.charge_min_pct.map_or_else(dash, |c| format!("{c:.0} %")),
+                o.runtime_estimate_start_s
+                    .map_or_else(dash, |r| format::duration(f64::from(r))),
+                match (o.avg_power_w, o.avg_load_pct) {
+                    (Some(w), Some(l)) => format!("{w:.0} W ({l:.0} %)"),
+                    (Some(w), None) => format!("{w:.0} W"),
+                    (None, Some(l)) => format!("{l:.0} %"),
+                    (None, None) => dash(),
+                },
+                o.energy_wh.map_or_else(dash, |e| format!("{e:.1} Wh")),
+                match (o.recharge_duration(), o.end) {
+                    (Some(d), _) => format::duration(secs(d)),
+                    // Newest first: only the newest outage can still be recharging.
+                    (None, Some(_)) if i == 0 => "in progress".to_owned(),
+                    (None, Some(_)) => "interrupted".to_owned(),
+                    (None, None) => dash(),
+                },
+                notes.join(", "),
+            ]
+        })
+        .collect();
+
+    let months = stats.map(|s| s.months.clone()).unwrap_or_default();
+    let month_labels = months
+        .iter()
+        .map(|m| {
+            ups_analysis::stats::parse_month(m).map_or_else(
+                || m.clone(),
+                |(y, mo)| ups_analysis::stats::month_label(y, mo),
+            )
+        })
+        .collect();
+    let summary = match outages.len() {
+        0 => "No outages recorded in the last 90 days.".to_owned(),
+        1 => "1 outage in the last 90 days.".to_owned(),
+        n => format!("{n} outages in the last 90 days, newest first."),
+    };
+    OutagesView {
+        cards,
+        rows,
+        summary,
+        months,
+        month_labels,
+    }
+}
+
+#[cfg(test)]
+mod outage_tests {
+    use chrono::{Duration, TimeZone};
+    use ups_api::{Outage, PeriodStats, StatsResponse};
+
+    use super::*;
+
+    #[test]
+    fn builds_outage_rows_and_cards() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap();
+        let mut done = Outage::started(now - Duration::hours(3));
+        done.id = 1;
+        done.end = Some(done.start + Duration::minutes(12));
+        done.charge_start_pct = Some(100.0);
+        done.charge_end_pct = Some(81.0);
+        done.charge_min_pct = Some(81.0);
+        done.avg_power_w = Some(96.0);
+        done.avg_load_pct = Some(20.0);
+        done.energy_wh = Some(19.2);
+        done.recharged_at = Some(done.start + Duration::minutes(80));
+        let mut ongoing = Outage::started(now - Duration::seconds(90));
+        ongoing.id = 2;
+        ongoing.start_earliest = Some(now - Duration::minutes(5));
+
+        let day = now.date_naive();
+        let stats = StatsResponse {
+            periods: vec![PeriodStats {
+                label: "Today".into(),
+                first_day: day,
+                last_day: day,
+                outages: 2,
+                on_battery_s: 810.0,
+                longest_s: 720.0,
+                monitored_s: 43_200.0,
+                coverage_pct: 100.0,
+                availability_pct: Some(98.125),
+                avg_recharge_s: None,
+            }],
+            months: vec!["2026-11".into()],
+        };
+        let v = outages_view(&[ongoing, done], Some(&stats), now);
+        assert_eq!(v.cards[0].outages, "2 outages");
+        assert_eq!(v.cards[0].availability, "Mains availability: 98.1 %");
+        assert_eq!(v.rows[0][1], "ongoing · 1 min 30 s");
+        assert_eq!(v.rows[0][8], "start not observed");
+        assert_eq!(v.rows[1][2], "100 → 81 %");
+        assert_eq!(v.rows[1][5], "96 W (20 %)");
+        assert_eq!(v.rows[1][7], "1 h 08 min");
+        assert_eq!(v.rows[1].len(), OUTAGE_COLUMNS.len());
+        assert_eq!(v.month_labels, ["November 2026"]);
+        assert!(v.summary.starts_with("2 outages"));
+    }
+}

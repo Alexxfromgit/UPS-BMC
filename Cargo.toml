@@ -6,6 +6,7 @@ members = [
     "crates/ups-source",
     "crates/ups-store",
     "crates/ups-api",
+    "crates/ups-analysis",
     "apps/hid-probe",
     "apps/ups-collector",
     "apps/ups-bmc",
@@ -24,6 +25,7 @@ ups-hid = { path = "crates/ups-hid" }
 ups-source = { path = "crates/ups-source" }
 ups-store = { path = "crates/ups-store" }
 ups-api = { path = "crates/ups-api" }
+ups-analysis = { path = "crates/ups-analysis" }
 
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }

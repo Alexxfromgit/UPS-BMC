@@ -25,7 +25,7 @@ This protects the PC whether or not UPS-BMC is running.
 |-----------|-------|--------|
 | M0 | Workspace, CI, ADRs, `hid-probe`, real-device capture | done |
 | M1 = V1 | Collector + SQLite + API, Slint dashboard, tray, toasts | done (incl. beeper setting, autostart, installer) |
-| M2 = V2 | Outage engine, outage history, monthly report (HTML/CSV) | planned |
+| M2 = V2 | Outage engine, outage history, statistics, monthly report (HTML/CSV) | done |
 | M3 = V3 | Load-normalised battery degradation estimate, guided runtime test | planned |
 | M4 = V4 | NUT source, remote collector (Raspberry Pi, or NUT via Entware on a Keenetic router if it proves reliable), remote UI, ntfy/Telegram/email | planned |
 | M5 | More UPS settings: output voltage, thresholds (beeper already done in M1) ([ADR-0003](docs/adr/0003-ups-configuration-writes.md)) | proposed |
@@ -67,6 +67,15 @@ cargo build --release -p ups-collector -p ups-bmc
   collector is running yet. The simulator has a power outage every 5 minutes.
 - **Collector options:** `ups-collector --help` lists them (source, polling
   interval, database path, retention).
+- **Outages tab:** statistics cards (today, last 7 and 30 days, this month)
+  and every outage with its duration, battery start → end, lowest charge,
+  the UPS's runtime estimate, average load, energy used and recharge time.
+  Flapping power (mains back for under 5 s) counts as one outage. When the
+  collector wasn't running, a start or end it didn't see is marked "not
+  observed". Availability only counts monitored time.
+- **Reports tab:** pick a month to open an HTML report (summary, daily
+  overview, outage table) or export a CSV. Both are saved to
+  `Documents\UPS-BMC Reports`.
 - **Settings** (top right of the window):
   - **UPS beeper:** on/off. The change is verified by reading it back from the UPS.
   - **Start with Windows:** turns autostart at sign-in on or off.
@@ -78,6 +87,9 @@ cargo build --release -p ups-collector -p ups-bmc
 | `GET /api/v1/events?limit=50` | recent events, newest first |
 | `WS /api/v1/live` | status every poll plus events as they happen |
 | `POST /api/v1/settings/beeper` | `{"enabled": true}`: switch the UPS beeper (verified, logged) |
+| `GET /api/v1/outages?days=90` | recorded outages, newest first |
+| `GET /api/v1/stats` | today / 7 days / 30 days / this month, plus months with data |
+| `GET /api/v1/report?month=2026-11&format=html` | monthly report (`html` or `csv`) |
 
 ## Workspace layout
 ```
@@ -86,6 +98,7 @@ crates/ups-hid       defensive HID report-descriptor parser + Power Device / Bat
 crates/ups-source    telemetry sources: HID (read-only, HID → NUT mapping), simulator
 crates/ups-store     SQLite storage (samples, events, device), WAL, retention
 crates/ups-api       collector API wire types (v1)
+crates/ups-analysis  outage tracker, daily coverage, period statistics, HTML/CSV reports (pure)
 apps/ups-collector   headless collector: poller → ingest/events → SQLite, HTTP + WebSocket API
 apps/ups-bmc         Slint desktop UI: dashboard, charts, events, tray icon, notifications
 apps/hid-probe       read-only discovery tool for HID UPS devices

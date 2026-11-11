@@ -6,6 +6,7 @@
 mod api;
 mod detector;
 mod ingest;
+mod outages;
 mod poller;
 
 use std::net::SocketAddr;
@@ -59,6 +60,9 @@ struct Args {
     /// Keep raw samples for this many days.
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=3650))]
     retention_days: u32,
+    /// Simulator clock speed-up (testing only).
+    #[arg(long, default_value_t = 1, hide = true)]
+    sim_speed: u32,
     /// Directory for log files (default: the per-user data directory).
     #[arg(long)]
     log_dir: Option<PathBuf>,
@@ -128,7 +132,9 @@ fn main() -> Result<()> {
             product_id: args.pid,
             ..HidConfig::default()
         }),
-        SourceKind::Sim => SourceConfig::Sim,
+        SourceKind::Sim => SourceConfig::Sim {
+            speed: args.sim_speed,
+        },
     };
     let interval = Duration::from_millis(args.poll_ms);
 

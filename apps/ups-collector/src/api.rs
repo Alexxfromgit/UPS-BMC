@@ -6,15 +6,16 @@ use std::sync::{Arc, RwLock};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
+use chrono::{Local, Utc};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use tracing::debug;
 use ups_api::{
-    BeeperRequest, EventsResponse, HistoryResponse, LiveMessage, SettingResponse, StatusResponse,
+    BeeperRequest, EventsResponse, HistoryResponse, LiveMessage, OutagesResponse, SettingResponse,
+    StatsResponse, StatusResponse,
 };
 use ups_source::Setting;
 
@@ -44,6 +45,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/events", get(events))
         .route("/api/v1/live", get(live))
         .route("/api/v1/settings/beeper", post(set_beeper))
+        .route("/api/v1/outages", get(outages))
+        .route("/api/v1/stats", get(stats))
+        .route("/api/v1/report", get(report))
         .with_state(state)
 }
 
@@ -197,4 +201,109 @@ async fn set_beeper(
         })),
         Err(e) => Err((StatusCode::CONFLICT, e)),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct OutagesParams {
+    /// How far back, in days (default 90, max 3650).
+    days: Option<u32>,
+    /// Maximum number of outages (default 500, max 5000).
+    limit: Option<usize>,
+}
+
+async fn outages(
+    State(state): State<AppState>,
+    Query(p): Query<OutagesParams>,
+) -> Result<Json<OutagesResponse>, ApiError> {
+    let days = p.days.unwrap_or(90).clamp(1, 3650);
+    let limit = p.limit.unwrap_or(500).clamp(1, 5000);
+    let from = Utc::now() - chrono::Duration::days(i64::from(days));
+    let outages = query(&state, move |s| s.outages_since(from, limit)).await?;
+    Ok(Json(OutagesResponse { outages }))
+}
+
+async fn stats(State(state): State<AppState>) -> Result<Json<StatsResponse>, ApiError> {
+    let now = Utc::now();
+    let response = query(&state, move |s| {
+        // Enough history for "last 30 days" and "this month".
+        let outages = s.outages_since(now - chrono::Duration::days(62), 100_000)?;
+        let daily = s.all_daily()?;
+        Ok(StatsResponse {
+            periods: ups_analysis::stats::standard_periods(&outages, &daily, &Local, now),
+            months: ups_analysis::stats::months_with_data(&daily),
+        })
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReportParams {
+    /// `YYYY-MM`
+    month: String,
+    /// `html` (default) or `csv`
+    format: Option<String>,
+}
+
+async fn report(
+    State(state): State<AppState>,
+    Query(p): Query<ReportParams>,
+) -> Result<Response, ApiError> {
+    use ups_analysis::{report, stats};
+
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_owned());
+    let (year, month) =
+        stats::parse_month(&p.month).ok_or_else(|| bad("month must look like 2026-11"))?;
+    let csv = match p.format.as_deref().unwrap_or("html") {
+        "html" => false,
+        "csv" => true,
+        _ => return Err(bad("format must be html or csv")),
+    };
+    let (first, _) = stats::month_range(year, month).ok_or_else(|| bad("invalid month"))?;
+    let now = Utc::now();
+    // Start a day early: the month starts at local midnight, not UTC midnight.
+    let from = first
+        .pred_opt()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map_or(now, |d| d.and_utc());
+    let body = query(&state, move |s| {
+        let outages = s.outages_since(from, 100_000)?;
+        Ok(if csv {
+            report::monthly_csv(year, month, &outages, &Local, now)
+        } else {
+            let daily = s.all_daily()?;
+            let device = s.device()?;
+            let generator = format!("UPS-BMC {}", env!("CARGO_PKG_VERSION"));
+            report::monthly_html(
+                year,
+                month,
+                &outages,
+                &daily,
+                device.as_ref(),
+                &Local,
+                now,
+                &generator,
+            )
+        })
+    })
+    .await?
+    .ok_or_else(|| bad("invalid month"))?;
+
+    let (mime, ext) = if csv {
+        ("text/csv; charset=utf-8", "csv")
+    } else {
+        ("text/html; charset=utf-8", "html")
+    };
+    let disposition = format!(
+        "inline; filename=\"{}\"",
+        report::file_name(year, month, ext)
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime.to_owned()),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        body,
+    )
+        .into_response())
 }

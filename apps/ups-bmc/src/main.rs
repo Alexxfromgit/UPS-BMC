@@ -16,11 +16,11 @@ use std::rc::Rc;
 
 use anyhow::Result;
 use clap::Parser;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, StandardListViewItem, VecModel};
 use ups_api::{DEFAULT_PORT, Event, EventKind};
 
 use crate::client::{ClientConfig, Update};
-use crate::view::{EventLine, View};
+use crate::view::{EventLine, OutagesView, View};
 
 /// Code generated from `ui/app.slint`.
 #[allow(
@@ -32,7 +32,7 @@ use crate::view::{EventLine, View};
 mod ui {
     slint::include_modules!();
 }
-use ui::{AppWindow, EventRow, Tray};
+use ui::{AppWindow, EventRow, StatCardData, Tray};
 
 /// UPS-BMC desktop UI.
 #[derive(Debug, Parser)]
@@ -107,6 +107,120 @@ fn apply_events(w: &AppWindow, lines: Vec<EventLine>) {
         })
         .collect();
     w.set_events(ModelRc::from(Rc::new(VecModel::from(rows))));
+}
+
+fn apply_outages(w: &AppWindow, v: &OutagesView) {
+    let cards: Vec<StatCardData> = v
+        .cards
+        .iter()
+        .map(|c| StatCardData {
+            title: c.title.as_str().into(),
+            outages: c.outages.as_str().into(),
+            on_battery: c.on_battery.as_str().into(),
+            availability: c.availability.as_str().into(),
+            coverage: c.coverage.as_str().into(),
+        })
+        .collect();
+    w.set_stat_cards(ModelRc::from(Rc::new(VecModel::from(cards))));
+    let rows: Vec<ModelRc<StandardListViewItem>> = v
+        .rows
+        .iter()
+        .map(|r| {
+            let cells: Vec<StandardListViewItem> = r
+                .iter()
+                .map(|c| StandardListViewItem::from(c.as_str()))
+                .collect();
+            ModelRc::from(Rc::new(VecModel::from(cells)))
+        })
+        .collect();
+    w.set_outage_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+    w.set_outages_summary(v.summary.as_str().into());
+    let strings = |items: &[String]| {
+        let v: Vec<SharedString> = items.iter().map(|s| s.as_str().into()).collect();
+        ModelRc::from(Rc::new(VecModel::from(v)))
+    };
+    // Only replace the month list when it changed, so the selection stays.
+    let keys: Vec<String> = w.get_month_keys().iter().map(|s| s.to_string()).collect();
+    if keys != v.months {
+        w.set_month_keys(strings(&v.months));
+        w.set_month_labels(strings(&v.month_labels));
+        w.set_month_index(0);
+    }
+}
+
+/// Opens a saved report with its default application (HTML: the browser),
+/// or shows a CSV in the file manager.
+fn open_path(path: &std::path::Path, reveal: bool) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        if reveal {
+            c.arg(format!("/select,{}", path.display()));
+        } else {
+            c.arg(path);
+        }
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(if reveal {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        });
+        c
+    };
+    cmd.spawn().map(|_| ())
+}
+
+/// Reports tab: download the selected month's report and open it.
+fn wire_reports(window: &AppWindow, collector: &str) {
+    let w = window.as_weak();
+    let address = collector.to_owned();
+    window.on_open_report(move |index, csv| {
+        let Some(win) = w.upgrade() else { return };
+        let Some(month) = usize::try_from(index)
+            .ok()
+            .and_then(|i| win.get_month_keys().row_data(i))
+        else {
+            return;
+        };
+        win.set_report_message("Generating report…".into());
+        let (w, address, month) = (w.clone(), address.clone(), month.to_string());
+        std::thread::spawn(move || {
+            let result = save_report(&address, &month, csv);
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = w.upgrade() {
+                    w.set_report_message(
+                        match result {
+                            Ok(path) => format!("Saved {}", path.display()),
+                            Err(e) => format!("Report failed: {e}"),
+                        }
+                        .into(),
+                    );
+                }
+            });
+        });
+    });
+}
+
+fn save_report(address: &str, month: &str, csv: bool) -> Result<std::path::PathBuf, String> {
+    let body = client::fetch_report(address, month, csv)?;
+    let (year, mon) =
+        ups_analysis::stats::parse_month(month).ok_or_else(|| format!("bad month {month}"))?;
+    let dir = directories::UserDirs::new()
+        .and_then(|d| d.document_dir().map(|p| p.join("UPS-BMC Reports")))
+        .ok_or("could not find the Documents folder")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(ups_analysis::report::file_name(
+        year,
+        mon,
+        if csv { "csv" } else { "html" },
+    ));
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    open_path(&path, csv).map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 /// `AppUserModelID` of the installed Start Menu shortcut (`installer/ups-bmc.iss`).
@@ -210,6 +324,7 @@ fn main() -> Result<()> {
     );
     wire_tray(&window, &tray);
     wire_settings(&window, &args.collector);
+    wire_reports(&window, &args.collector);
 
     let collector_args: Vec<String> = if args.sim {
         vec!["--source".into(), "sim".into()]
@@ -249,6 +364,7 @@ fn main() -> Result<()> {
                     Update::View(v) => apply_view(&w, &t, &v),
                     Update::Events(lines) => apply_events(&w, lines),
                     Update::Notify(e) => notify(&e),
+                    Update::Outages(v) => apply_outages(&w, &v),
                 }
             });
         },

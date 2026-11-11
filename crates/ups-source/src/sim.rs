@@ -25,6 +25,7 @@ const NOMINAL_W: f64 = 480.0;
 #[derive(Debug)]
 pub struct SimSource {
     started: Instant,
+    speed: u32,
     beeper: bool,
 }
 
@@ -33,7 +34,19 @@ impl SimSource {
     pub fn new() -> Self {
         Self {
             started: Instant::now(),
+            speed: 1,
             beeper: true,
+        }
+    }
+}
+
+impl SimSource {
+    /// A simulator whose clock runs `speed` times faster (`1` = real time).
+    #[must_use]
+    pub fn with_speed(speed: u32) -> Self {
+        Self {
+            speed: speed.max(1),
+            ..Self::new()
         }
     }
 }
@@ -62,7 +75,7 @@ impl TelemetrySource for SimSource {
     }
 
     fn poll(&mut self) -> Result<Snapshot, SourceError> {
-        let mut s = snapshot_at(self.started.elapsed(), Utc::now());
+        let mut s = snapshot_at(self.started.elapsed() * self.speed, Utc::now());
         let beeper = if self.beeper { "enabled" } else { "disabled" };
         s.extra
             .insert(vars::UPS_BEEPER_STATUS.into(), beeper.into());

@@ -1,7 +1,15 @@
 // UPS-BMC desktop UI. All values are prepared in Rust (src/view.rs); this
 // file is layout and styling only.
 
-import { Button, AboutSlint, ScrollView, Switch } from "std-widgets.slint";
+import { Button, AboutSlint, ScrollView, Switch, TabWidget, StandardTableView, ComboBox } from "std-widgets.slint";
+
+export struct StatCardData {
+    title: string,
+    outages: string,
+    on-battery: string,
+    availability: string,
+    coverage: string,
+}
 
 export struct EventRow {
     time: string,
@@ -278,6 +286,17 @@ export component AppWindow inherits Window {
 
     callback start-collector();
 
+    // Outages and reports
+    in property <[StatCardData]> stat-cards;
+    in property <[[StandardListViewItem]]> outage-rows;
+    in property <string> outages-summary;
+    in property <[string]> month-labels;
+    // YYYY-MM keys matching month-labels.
+    in property <[string]> month-keys;
+    in-out property <int> month-index;
+    in property <string> report-message;
+    callback open-report(int, bool);
+
     // Settings
     in-out property <bool> beeper-on;
     in property <bool> beeper-available;
@@ -505,6 +524,20 @@ export component AppWindow inherits Window {
             }
         }
 
+        TabWidget {
+
+        vertical-stretch: 1;
+
+        Tab {
+
+        title: "Dashboard";
+
+        VerticalLayout {
+
+        padding-top: 14px;
+
+        spacing: 14px;
+
         // Metrics
         HorizontalLayout {
             spacing: 14px;
@@ -612,7 +645,7 @@ export component AppWindow inherits Window {
         // Events
         Card {
             title: "RECENT EVENTS";
-            height: 170px;
+            min-height: 120px;
             ScrollView {
                 VerticalLayout {
                     spacing: 4px;
@@ -644,6 +677,110 @@ export component AppWindow inherits Window {
                 }
             }
         }
+        }  // Dashboard VerticalLayout
+        }  // Dashboard Tab
+
+        Tab {
+            title: "Outages";
+            VerticalLayout {
+                padding-top: 14px;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 14px;
+                    if root.stat-cards.length == 0: Text {
+                        text: "Statistics appear once the collector has recorded some data.";
+                        color: Theme.muted;
+                    }
+                    for card in root.stat-cards: Card {
+                        title: card.title;
+                        Text {
+                            text: card.outages;
+                            color: Theme.text;
+                            font-size: 22px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: card.on-battery;
+                            color: Theme.muted;
+                            font-size: 12px;
+                        }
+                        Text {
+                            text: card.availability;
+                            color: Theme.muted;
+                            font-size: 12px;
+                        }
+                        Text {
+                            text: card.coverage;
+                            color: Theme.muted;
+                            font-size: 12px;
+                        }
+                    }
+                }
+                Text {
+                    text: root.outages-summary;
+                    color: Theme.muted;
+                    font-size: 12px;
+                }
+                StandardTableView {
+                    vertical-stretch: 1;
+                    columns: [
+                        { title: "Started", min-width: 180px }, { title: "Duration" }, { title: "Battery" },
+                        { title: "Lowest" }, { title: "UPS estimate" }, { title: "Avg load" },
+                        { title: "Energy" }, { title: "Recharge" }, { title: "Notes" },
+                    ];
+                    rows: root.outage-rows;
+                }
+            }
+        }
+
+        Tab {
+            title: "Reports";
+            VerticalLayout {
+                padding-top: 14px;
+                spacing: 14px;
+                alignment: start;
+                Card {
+                    title: "MONTHLY POWER REPORT";
+                    Text {
+                        text: "Mains availability, every outage with battery figures, daily overview and recharge times for one month. HTML opens in your browser and prints well. CSV is for spreadsheets. Files are saved to Documents\\UPS-BMC Reports.";
+                        color: Theme.muted;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: start;
+                        ComboBox {
+                            width: 220px;
+                            model: root.month-labels;
+                            current-index <=> root.month-index;
+                            enabled: root.month-labels.length > 0;
+                        }
+                        Button {
+                            text: "Open HTML report";
+                            primary: true;
+                            enabled: root.month-labels.length > 0;
+                            clicked => {
+                                root.open-report(root.month-index, false);
+                            }
+                        }
+                        Button {
+                            text: "Export CSV";
+                            enabled: root.month-labels.length > 0;
+                            clicked => {
+                                root.open-report(root.month-index, true);
+                            }
+                        }
+                    }
+                    if root.report-message != "": Text {
+                        text: root.report-message;
+                        color: Theme.text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+        }  // TabWidget
     }
 }
 

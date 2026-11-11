@@ -70,7 +70,10 @@ pub trait TelemetrySource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceConfig {
     Hid(hid::HidConfig),
-    Sim,
+    /// Simulated UPS; `speed` > 1 runs simulated time faster (tests).
+    Sim {
+        speed: u32,
+    },
 }
 
 impl SourceConfig {
@@ -80,7 +83,7 @@ impl SourceConfig {
     pub fn create(&self) -> Box<dyn TelemetrySource> {
         match self {
             Self::Hid(cfg) => Box::new(hid::HidSource::new(cfg.clone())),
-            Self::Sim => Box::new(sim::SimSource::new()),
+            Self::Sim { speed } => Box::new(sim::SimSource::with_speed(*speed)),
         }
     }
 

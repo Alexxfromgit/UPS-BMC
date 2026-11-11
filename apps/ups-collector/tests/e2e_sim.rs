@@ -32,6 +32,10 @@ fn free_port() -> u16 {
 }
 
 fn start() -> Collector {
+    start_with(&[])
+}
+
+fn start_with(extra: &[&str]) -> Collector {
     let port = free_port();
     let dir = std::env::temp_dir().join(format!("ups-collector-e2e-{}-{port}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -42,6 +46,7 @@ fn start() -> Collector {
         .arg(dir.join("test.sqlite"))
         .arg("--log-dir")
         .arg(dir.join("logs"))
+        .args(extra)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -194,4 +199,51 @@ fn refuses_non_loopback_bind() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("only loopback"), "{stderr}");
+}
+
+fn text(c: &Collector, path: &str) -> (u16, String) {
+    let mut resp = ureq::get(format!("http://{}{path}", c.base))
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.body_mut().read_to_string().unwrap_or_default())
+}
+
+#[test]
+fn records_outages_stats_and_reports() {
+    // 30× simulator: outage from ~2 s to ~5 s, recharged by ~10 s.
+    let c = start_with(&["--sim-speed", "30"]);
+    let outage = wait_for(Duration::from_secs(30), || {
+        get::<ups_api::OutagesResponse>(&c, "/api/v1/outages?days=1")?
+            .outages
+            .into_iter()
+            .find(|o| o.recharged_at.is_some())
+    });
+    assert!(outage.end.is_some());
+    assert!(outage.start_observed() && outage.end_observed());
+    assert_eq!(outage.charge_start_pct, Some(100.0));
+    assert!(outage.charge_min_pct.unwrap() < 30.0, "{outage:?}");
+    assert!(outage.energy_wh.unwrap() > 0.0);
+    assert!(outage.recharge_duration().unwrap() > chrono::Duration::zero());
+
+    let stats: ups_api::StatsResponse = get(&c, "/api/v1/stats").unwrap();
+    assert_eq!(stats.periods[0].label, "Today");
+    assert!(stats.periods[0].outages >= 1);
+    assert!(stats.periods[0].on_battery_s > 0.0, "{stats:?}");
+    let month = stats.months.first().cloned().expect("current month listed");
+
+    let (code, html) = text(&c, &format!("/api/v1/report?month={month}&format=html"));
+    assert_eq!(code, 200);
+    assert!(html.contains("Power report"), "{html}");
+    let (code, csv) = text(&c, &format!("/api/v1/report?month={month}&format=csv"));
+    assert_eq!(code, 200);
+    assert!(csv.lines().count() >= 2, "{csv}");
+    assert_eq!(text(&c, "/api/v1/report?month=2026-13").0, 400);
+    assert_eq!(
+        text(&c, &format!("/api/v1/report?month={month}&format=pdf")).0,
+        400
+    );
 }
