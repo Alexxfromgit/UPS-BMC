@@ -4,10 +4,12 @@
 //! which writes the same value.
 
 /// Registry value name (shared with the installer, `installer/ups-bmc.iss`).
+#[cfg_attr(not(windows), allow(dead_code))] // autostart is Windows-only
 pub const VALUE_NAME: &str = "UPS-BMC";
 
 /// The command line registered for autostart.
 #[must_use]
+#[cfg_attr(not(windows), allow(dead_code))] // autostart is Windows-only
 pub fn command_line(exe: &std::path::Path) -> String {
     format!("\"{}\" --minimized", exe.display())
 }
