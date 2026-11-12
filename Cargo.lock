@@ -2031,7 +2031,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hid-probe"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5627,7 +5627,7 @@ checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
 
 [[package]]
 name = "ups-analysis"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "ups-model",
@@ -5635,7 +5635,7 @@ dependencies = [
 
 [[package]]
 name = "ups-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -5645,7 +5645,7 @@ dependencies = [
 
 [[package]]
 name = "ups-bmc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5666,7 +5666,7 @@ dependencies = [
 
 [[package]]
 name = "ups-collector"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -5691,7 +5691,7 @@ dependencies = [
 
 [[package]]
 name = "ups-hid"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proptest",
  "serde",
@@ -5701,7 +5701,7 @@ dependencies = [
 
 [[package]]
 name = "ups-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bitflags 2.13.2",
  "chrono",
@@ -5711,7 +5711,7 @@ dependencies = [
 
 [[package]]
 name = "ups-source"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "hidapi",
@@ -5724,7 +5724,7 @@ dependencies = [
 
 [[package]]
 name = "ups-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "rusqlite",
