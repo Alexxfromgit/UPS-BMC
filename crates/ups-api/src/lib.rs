@@ -16,11 +16,16 @@
 //! | POST | `/api/v1/battery/test` with [`RuntimeTestRequest`] | [`SettingResponse`] |
 //! | POST | `/api/v1/shutdown` with `{}` | [`SettingResponse`]; the collector stops |
 //!
-//! Every request must use a loopback `Host` (`127.0.0.1:<port>`,
-//! `localhost:<port>`, `[::1]:<port>`) and carry no `Origin` header: the API
-//! is for local native clients only.
+//! **Access** (ADR-0005). Requests carrying an `Origin` header are always
+//! refused, so web pages can't use the API. Otherwise a request is allowed
+//! when either
+//! * it comes from this computer (loopback peer) with a loopback `Host`
+//!   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`), or
+//! * it carries `Authorization: Bearer <token>` with the collector's token.
 //!
-//! The collector binds to `127.0.0.1:47800` by default (see ADR-0002).
+//! The collector binds to `127.0.0.1:47800` by default (ADR-0002). Listening
+//! on other addresses (e.g. a Raspberry Pi serving the LAN) requires a token.
+//! `POST /api/v1/shutdown` is only accepted from this computer.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -34,6 +39,29 @@ pub use ups_model::{
 pub const DEFAULT_PORT: u16 = 47_800;
 /// URL prefix of this API version.
 pub const PREFIX: &str = "/api/v1";
+
+/// Environment variable holding the API token, for the UI and the collector.
+pub const TOKEN_ENV: &str = "UPS_BMC_TOKEN";
+
+/// The title of a notification about `event` (desktop toast, ntfy, Telegram,
+/// email), or `None` for events that don't deserve one.
+#[must_use]
+pub fn notification_title(event: &Event) -> Option<&'static str> {
+    Some(match event.kind {
+        EventKind::PowerLost => "Power outage",
+        EventKind::PowerRestored => "Power restored",
+        EventKind::LowBattery => "UPS battery low!",
+        EventKind::CommunicationLost => "UPS connection lost",
+        EventKind::CommunicationRestored => "UPS connection restored",
+        EventKind::Overload => "UPS overloaded",
+        EventKind::ReplaceBattery => "Replace the UPS battery",
+        EventKind::RuntimeTestRestorePower => "Runtime test: plug the UPS back in",
+        EventKind::RuntimeTest if event.message.starts_with("Runtime test finished") => {
+            "Runtime test finished"
+        }
+        _ => return None,
+    })
+}
 
 /// Connection between the collector and the UPS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 [package]
 name = "ups-source"
-description = "Telemetry sources: direct HID (read-only), simulator; later NUT"
+description = "Telemetry sources: direct HID (read-only), NUT upsd client, simulator"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,17 +9,27 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = ["hid"]
+# Direct USB HID access (Windows and Linux). Not needed for a NUT-only build.
+hid = ["dep:hidapi", "dep:ups-hid"]
+
 [dependencies]
-ups-hid.workspace = true
+ups-hid = { workspace = true, optional = true }
 ups-model.workspace = true
 
 chrono.workspace = true
-hidapi.workspace = true
+hidapi = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+ups-hid.workspace = true
+
+[[test]]
+name = "eaton_5e_mapping"
+required-features = ["hid"]
 
 [lints]
 workspace = true

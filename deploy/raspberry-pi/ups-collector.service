@@ -1,0 +1,49 @@
+# systemd unit for the UPS-BMC collector on a Raspberry Pi (or any Linux host) reading NUT.
+# Install: see docs/raspberry-pi.md. Copy to /etc/systemd/system/ups-collector.service.
+[Unit]
+Description=UPS-BMC collector (UPS telemetry, outage history, notifications)
+Documentation=https://github.com/Alexxfromgit/UPS-BMC/blob/main/docs/raspberry-pi.md
+Wants=network-online.target
+After=network-online.target nut-server.service
+
+[Service]
+Type=simple
+User=ups-bmc
+Group=ups-bmc
+ExecStart=/usr/local/bin/ups-collector \
+    --source nut --nut localhost \
+    --bind 0.0.0.0:47800 --token-file /etc/ups-bmc/token \
+    --config /etc/ups-bmc/collector.toml \
+    --db /var/lib/ups-bmc/ups-bmc.sqlite \
+    --log-dir /var/log/ups-bmc
+# Creates /var/lib/ups-bmc and /var/log/ups-bmc, owned by the service user.
+StateDirectory=ups-bmc
+LogsDirectory=ups-bmc
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Hardening: the collector only needs its own directories and the network.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+ReadOnlyPaths=/etc/ups-bmc
+
+[Install]
+WantedBy=multi-user.target

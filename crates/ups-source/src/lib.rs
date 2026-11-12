@@ -7,10 +7,18 @@
 //!
 //! * [`hid::HidSource`]: reads a USB HID Power Device directly (read-only, see
 //!   ADR-0001).
+//! * [`nut::NutSource`]: reads a UPS through NUT's `upsd` (e.g. on a
+//!   Raspberry Pi, ADR-0005). Read-only.
 //! * [`sim::SimSource`]: a deterministic simulated UPS with periodic outages,
 //!   for UI development and tests.
+//!
+//! The HID source needs the `hid` feature (on by default). A collector that
+//! only reads NUT, such as the Raspberry Pi build, can leave it out and so
+//! needs neither hidapi nor libudev.
 
+#[cfg(feature = "hid")]
 pub mod hid;
+pub mod nut;
 pub mod sim;
 
 use std::time::Duration;
@@ -69,11 +77,12 @@ pub trait TelemetrySource {
 /// Which source to create.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceConfig {
+    #[cfg(feature = "hid")]
     Hid(hid::HidConfig),
+    /// A UPS served by NUT's `upsd`.
+    Nut(nut::NutConfig),
     /// Simulated UPS; `speed` > 1 runs simulated time faster (tests).
-    Sim {
-        speed: u32,
-    },
+    Sim { speed: u32 },
 }
 
 impl SourceConfig {
@@ -82,7 +91,9 @@ impl SourceConfig {
     #[must_use]
     pub fn create(&self) -> Box<dyn TelemetrySource> {
         match self {
+            #[cfg(feature = "hid")]
             Self::Hid(cfg) => Box::new(hid::HidSource::new(cfg.clone())),
+            Self::Nut(cfg) => Box::new(nut::NutSource::new(cfg.clone())),
             Self::Sim { speed } => Box::new(sim::SimSource::with_speed(*speed)),
         }
     }

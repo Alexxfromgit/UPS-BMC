@@ -21,7 +21,8 @@ moves monitoring to a Raspberry Pi.
 - **`ups-bmc`:** the Slint desktop UI. It talks only to the collector API,
   never to the database directly.
 - **API binding:** localhost by default. Exposing it on the LAN requires a
-  token.
+  token (implemented in M4, see ADR-0005; so are the remote notification
+  channels and the systemd unit).
 
 ## Consequences
 - Moving to the Pi in V4 only changes where the collector runs. The UI is

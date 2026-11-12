@@ -22,6 +22,9 @@ or replaced, and Windows keeps its built-in UPS shutdown protection.
   discharges, with a guided runtime test ([ADR-0004](docs/adr/0004-battery-health-estimation.md)).
 - **Small loads:** many UPSes read 0 % for a router or a laptop charger; you can enter an estimate
   instead.
+- **Raspberry Pi:** run the collector next to NUT on an always-on Pi, watch it from the desktop UI
+  over the LAN, and get notified through ntfy, Telegram or email
+  ([guide](docs/raspberry-pi.md), [ADR-0005](docs/adr/0005-remote-collector-and-nut.md)).
 
 > **Read-only by design.** UPS-BMC sends nothing to the UPS except the settings
 > you change on purpose in **Settings**. Today that is only the beeper
@@ -36,6 +39,7 @@ Get the latest version from [Releases](https://github.com/Alexxfromgit/UPS-BMC/r
 |---|---|
 | `UPS-BMC-setup-<version>.exe` | Per-user installer for Windows 10/11 (x64); no administrator rights needed |
 | `UPS-BMC-<version>-win-x64-portable.zip` | The same programs without installing |
+| `UPS-BMC-<version>-linux-arm64-collector.tar.gz` | The collector for a Raspberry Pi (64-bit Raspberry Pi OS) reading NUT, with its systemd unit; see the [Raspberry Pi guide](docs/raspberry-pi.md) |
 | `SHA256SUMS.txt` | Checksums of the files |
 
 The installer is not code-signed yet, so Windows SmartScreen may warn about it (*More info* →
@@ -70,7 +74,7 @@ This protects the PC whether or not UPS-BMC is running.
 | M1 = V1 | Collector + SQLite + API, Slint dashboard, tray, toasts | done (incl. beeper setting, autostart, installer) |
 | M2 = V2 | Outage engine, outage history, statistics, monthly report (HTML/CSV) | done |
 | M3 = V3 | Load-normalised battery degradation estimate, guided runtime test ([ADR-0004](docs/adr/0004-battery-health-estimation.md)) | done |
-| M4 = V4 | NUT source, remote collector (Raspberry Pi, or NUT via Entware on a router if it proves reliable), remote UI, ntfy/Telegram/email | planned |
+| M4 = V4 | NUT source, remote collector on a Raspberry Pi (systemd, arm64 build), remote UI with API token, ntfy/Telegram/email ([ADR-0005](docs/adr/0005-remote-collector-and-nut.md), [guide](docs/raspberry-pi.md)) | done |
 | M5 | More UPS settings: output voltage, thresholds (beeper already done in M1) ([ADR-0003](docs/adr/0003-ups-configuration-writes.md)) | proposed |
 
 **Polling:** each feature report takes about 44 ms on the 5E (USB control
@@ -111,7 +115,20 @@ cargo build --release -p ups-collector -p ups-bmc
 - **Simulated UPS:** without the hardware, try `ups-bmc --sim`. Make sure no
   collector is running yet. The simulator has a power outage every 5 minutes.
 - **Collector options:** `ups-collector --help` lists them (source, polling
-  interval, database path, retention).
+  interval, database path, retention, API token, notifications).
+- **Remote collector:** to watch a collector on another computer (e.g. a
+  Raspberry Pi, see the [guide](docs/raspberry-pi.md)), put its address and
+  API token in `%APPDATA%\UPS-BMC\config\ui.toml`:
+  ```toml
+  collector = "raspberrypi.lan:47800"
+  token = "…"
+  ```
+  or pass `--collector` and `--token-file`. The UI then doesn't start a local
+  collector.
+- **Notifications by ntfy, Telegram or email** are sent by the collector, so
+  they work without the UI. Configure them in a TOML file passed with
+  `--config` (see [`collector.toml.example`](deploy/raspberry-pi/collector.toml.example))
+  and check them with `--test-notify`.
 - **Outages tab:** statistics cards (today, last 7 and 30 days, this month)
   and every outage with its duration, battery start → end, lowest charge,
   the UPS's runtime estimate, average load, energy used and recharge time.
@@ -160,23 +177,28 @@ cargo build --release -p ups-collector -p ups-bmc
 | `GET /api/v1/health` | battery health report (verdict, confidence, discharges used) |
 | `POST /api/v1/settings/battery` | `{"installed": "2024-03-15"}`: battery installation date |
 | `POST /api/v1/battery/test` | `{"action": "start", "stop_at_pct": 50}` or `{"action": "cancel"}` |
-| `POST /api/v1/shutdown` | `{}`: stop the collector gracefully (used by the installer) |
+| `POST /api/v1/shutdown` | `{}`: stop the collector gracefully (used by the installer; this computer only) |
 
-The API only answers local native clients: requests need a loopback `Host`
-(`127.0.0.1`, `localhost` or `[::1]` with the port) and must not carry an
-`Origin` header, so web pages can't read or change anything through it.
+Requests with an `Origin` header are refused, so web pages can't read or
+change anything through the API. Other requests are answered when they come
+from this computer with a loopback `Host` (`127.0.0.1`, `localhost` or
+`[::1]` with the port), or when they carry `Authorization: Bearer <token>`.
+The collector listens on other addresses (`--bind 0.0.0.0:47800`) only with a
+token (`--token-file`; create one with `ups-collector --generate-token`). The
+API is plain HTTP: keep it on your LAN or behind a VPN.
 
 ## Workspace layout
 ```
 crates/ups-model     source-independent domain model (NUT names on the wire, status flags, snapshots, events)
 crates/ups-hid       defensive HID report-descriptor parser + Power Device / Battery System usage tables
-crates/ups-source    telemetry sources: HID (read-only, HID → NUT mapping), simulator
+crates/ups-source    telemetry sources: HID (read-only, HID → NUT mapping), NUT upsd client, simulator
 crates/ups-store     SQLite storage (samples, events, device), WAL, retention
 crates/ups-api       collector API wire types (v1)
 crates/ups-analysis  outage tracker, daily coverage, statistics, reports, battery health, runtime test (pure)
-apps/ups-collector   headless collector: poller → ingest/events → SQLite, HTTP + WebSocket API
+apps/ups-collector   headless collector: poller → ingest/events → SQLite, HTTP + WebSocket API, notifications
 apps/ups-bmc         Slint desktop UI: dashboard, outages, battery health, reports, tray icon, notifications
 apps/hid-probe       read-only discovery tool for HID UPS devices
+deploy/raspberry-pi  systemd unit and example configuration for a Pi collector
 docs/adr             architecture decision records
 docs/reviews         code review records and their resolution
 fixtures             curated real-device captures for tests
@@ -203,6 +225,11 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 Note that hidapi's hidraw backend can't read USB string descriptors, so
 `iProduct`-style strings show as unavailable on Linux.
+
+A collector that only reads NUT (the Raspberry Pi setup) needs none of this:
+```bash
+cargo build --release -p ups-collector --no-default-features
+```
 
 **IDE:** RustRover with the Slint plugin. Open the folder, and RustRover picks
 up the Cargo workspace and the pinned toolchain.

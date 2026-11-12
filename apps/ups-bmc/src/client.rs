@@ -5,6 +5,7 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use tungstenite::client::IntoClientRequest;
 use tungstenite::stream::MaybeTlsStream;
 use ups_api::{
     Event, EventsResponse, HealthReport, HistoryPoint, HistoryResponse, LiveMessage, Outage,
@@ -24,12 +25,78 @@ pub enum Update {
     Health(Box<HealthReport>),
 }
 
+/// Where the collector is, and the API token to send it (ADR-0005).
+#[derive(Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    /// `127.0.0.1:47800`, or e.g. `ups-pi.lan:47800` for a remote collector.
+    pub address: String,
+    pub token: Option<String>,
+}
+
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("address", &self.address)
+            .field("token", &self.token.as_ref().map(|_| "***"))
+            .finish()
+    }
+}
+
+impl Endpoint {
+    /// True for a collector on this computer, which the UI may start itself.
+    pub fn is_local(&self) -> bool {
+        let host = match self.address.rsplit_once(':') {
+            Some((h, p)) if p.bytes().all(|b| b.is_ascii_digit()) => h,
+            _ => self.address.as_str(),
+        };
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.address)
+    }
+
+    fn bearer(&self) -> Option<String> {
+        self.token.as_ref().map(|t| format!("Bearer {t}"))
+    }
+
+    fn get(&self, path: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        let request = ureq::get(self.url(path));
+        match self.bearer() {
+            Some(b) => request.header("Authorization", b),
+            None => request,
+        }
+    }
+
+    fn post(&self, path: &str) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
+        let request = ureq::post(self.url(path));
+        match self.bearer() {
+            Some(b) => request.header("Authorization", b),
+            None => request,
+        }
+    }
+}
+
+/// Error text for a failed request; explains a refused token.
+fn describe(e: &ureq::Error) -> String {
+    match e {
+        ureq::Error::StatusCode(401) => {
+            "the collector needs a valid API token (token in ui.toml or UPS_BMC_TOKEN)".into()
+        }
+        ureq::Error::StatusCode(403) => "the collector refused the request".into(),
+        other => other.to_string(),
+    }
+}
+
 /// Configuration of the client thread.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// `127.0.0.1:47800`
-    pub address: String,
-    /// Start the collector once if it isn't running.
+    pub endpoint: Endpoint,
+    /// Start the collector once if it isn't running (local collectors only).
     pub auto_start: bool,
     /// Arguments for an auto-started collector.
     pub collector_args: Vec<String>,
@@ -53,12 +120,14 @@ pub fn spawn(
 }
 
 fn http<T: serde::de::DeserializeOwned>(config: &ClientConfig, path: &str) -> Result<T, String> {
-    ureq::get(format!("http://{}{path}", config.address))
+    config
+        .endpoint
+        .get(path)
         .config()
         .timeout_global(Some(Duration::from_secs(5)))
         .build()
         .call()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| describe(&e))?
         .body_mut()
         .read_json()
         .map_err(|e| e.to_string())
@@ -72,10 +141,23 @@ fn run(config: &ClientConfig, send: &dyn Fn(Update)) {
     let mut tried_start = false;
     // Newest event seen, so events missed during a reconnect are notified.
     let mut last_event_id: Option<i64> = None;
+    let local = config.endpoint.is_local();
     loop {
         // 1. Is the collector there?
-        let Ok(status) = http::<StatusResponse>(config, "/api/v1/status") else {
-            {
+        let status = match http::<StatusResponse>(config, "/api/v1/status") {
+            Ok(status) => status,
+            Err(e) if !local => {
+                send(Update::View(Box::new(view::collector_offline(
+                    &format!(
+                        "Can't reach the collector at {} ({e}). Retrying…",
+                        config.endpoint.address
+                    ),
+                    false,
+                ))));
+                std::thread::sleep(RETRY);
+                continue;
+            }
+            Err(_) => {
                 if config.auto_start && !tried_start {
                     tried_start = true;
                     let detail = match crate::launch::start_collector(&config.collector_args) {
@@ -109,7 +191,8 @@ fn run(config: &ClientConfig, send: &dyn Fn(Update)) {
             http::<EventsResponse>(config, &format!("/api/v1/events?limit={MAX_EVENTS}"))
                 .map(|e| e.events)
                 .unwrap_or_default();
-        send(Update::View(Box::new(view::build(
+        send(Update::View(Box::new(dashboard(
+            config,
             &status,
             &history,
             Utc::now(),
@@ -149,6 +232,20 @@ fn run(config: &ClientConfig, send: &dyn Fn(Update)) {
     }
 }
 
+/// The dashboard view; names a remote collector in the footer.
+fn dashboard(
+    config: &ClientConfig,
+    status: &StatusResponse,
+    history: &[HistoryPoint],
+    now: chrono::DateTime<Utc>,
+) -> View {
+    let mut v = view::build(status, history, now);
+    if !config.endpoint.is_local() {
+        v.footer_text = format!("{} · at {}", v.footer_text, config.endpoint.address);
+    }
+    v
+}
+
 fn live(
     config: &ClientConfig,
     send: &dyn Fn(Update),
@@ -157,8 +254,14 @@ fn live(
     outages: &mut Outages,
     last_event_id: &mut Option<i64>,
 ) -> Result<(), String> {
-    let (mut ws, _) = tungstenite::connect(format!("ws://{}/api/v1/live", config.address))
+    let mut request = format!("ws://{}/api/v1/live", config.endpoint.address)
+        .into_client_request()
         .map_err(|e| e.to_string())?;
+    if let Some(bearer) = config.endpoint.bearer() {
+        let value = bearer.parse().map_err(|_| "invalid API token".to_owned())?;
+        request.headers_mut().insert("Authorization", value);
+    }
+    let (mut ws, _) = tungstenite::connect(request).map_err(|e| e.to_string())?;
     // The collector sends a status every poll; silence means it is gone.
     if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
         let _ = TcpStream::set_read_timeout(stream, Some(Duration::from_secs(10)));
@@ -177,7 +280,9 @@ fn live(
                 }
                 let now = Utc::now();
                 history.retain(|p| now - p.ts <= CHART_WINDOW);
-                send(Update::View(Box::new(view::build(&status, history, now))));
+                send(Update::View(Box::new(dashboard(
+                    config, &status, history, now,
+                ))));
                 // Ongoing outages tick; stats refresh periodically.
                 if outages.stats_due() {
                     outages.refresh_stats(config);
@@ -206,28 +311,24 @@ fn live(
 }
 
 /// Asks the collector to switch the UPS beeper (ADR-0003).
-pub fn set_beeper(address: &str, enabled: bool) -> Result<String, String> {
-    post_setting(address, "beeper", &ups_api::BeeperRequest { enabled })
+pub fn set_beeper(ep: &Endpoint, enabled: bool) -> Result<String, String> {
+    post_setting(ep, "beeper", &ups_api::BeeperRequest { enabled })
 }
 
 /// Sets or clears the load estimate used when the UPS reads 0 %.
-pub fn set_assumed_load(address: &str, watts: Option<f32>) -> Result<String, String> {
-    post_setting(
-        address,
-        "assumed-load",
-        &ups_api::AssumedLoadRequest { watts },
-    )
+pub fn set_assumed_load(ep: &Endpoint, watts: Option<f32>) -> Result<String, String> {
+    post_setting(ep, "assumed-load", &ups_api::AssumedLoadRequest { watts })
 }
 
 /// Sets or clears the battery installation date.
 /// With `replaced_now`, the collector records the current time instead.
 pub fn set_battery_installed(
-    address: &str,
+    ep: &Endpoint,
     installed: Option<chrono::NaiveDate>,
     replaced_now: bool,
 ) -> Result<String, String> {
     post(
-        address,
+        ep,
         "settings/battery",
         &ups_api::BatteryRequest {
             installed,
@@ -237,31 +338,32 @@ pub fn set_battery_installed(
 }
 
 /// Starts or cancels the guided runtime test.
-pub fn runtime_test(address: &str, request: ups_api::RuntimeTestRequest) -> Result<String, String> {
-    post(address, "battery/test", &request)
+pub fn runtime_test(ep: &Endpoint, request: ups_api::RuntimeTestRequest) -> Result<String, String> {
+    post(ep, "battery/test", &request)
 }
 
 /// The current battery health report.
-pub fn fetch_health(address: &str) -> Result<HealthReport, String> {
-    ureq::get(format!("http://{address}/api/v1/health"))
+pub fn fetch_health(ep: &Endpoint) -> Result<HealthReport, String> {
+    ep.get("/api/v1/health")
         .config()
         .timeout_global(Some(Duration::from_secs(10)))
         .build()
         .call()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| describe(&e))?
         .body_mut()
         .read_json()
         .map_err(|e| e.to_string())
 }
 
 /// POSTs a setting; returns the collector's message or its error text.
-fn post_setting(address: &str, name: &str, body: &impl serde::Serialize) -> Result<String, String> {
-    post(address, &format!("settings/{name}"), body)
+fn post_setting(ep: &Endpoint, name: &str, body: &impl serde::Serialize) -> Result<String, String> {
+    post(ep, &format!("settings/{name}"), body)
 }
 
 /// POSTs to `/api/v1/{path}`; returns the collector's message or its error text.
-fn post(address: &str, path: &str, body: &impl serde::Serialize) -> Result<String, String> {
-    let mut response = ureq::post(format!("http://{address}/api/v1/{path}"))
+fn post(ep: &Endpoint, path: &str, body: &impl serde::Serialize) -> Result<String, String> {
+    let mut response = ep
+        .post(&format!("/api/v1/{path}"))
         .config()
         .timeout_global(Some(Duration::from_secs(15)))
         .http_status_as_error(false)
@@ -359,17 +461,16 @@ impl Outages {
 }
 
 /// Downloads a monthly report (`month` = `YYYY-MM`) as text.
-pub fn fetch_report(address: &str, month: &str, csv: bool) -> Result<String, String> {
+pub fn fetch_report(ep: &Endpoint, month: &str, csv: bool) -> Result<String, String> {
     let format = if csv { "csv" } else { "html" };
-    let mut response = ureq::get(format!(
-        "http://{address}/api/v1/report?month={month}&format={format}"
-    ))
-    .config()
-    .timeout_global(Some(Duration::from_secs(30)))
-    .http_status_as_error(false)
-    .build()
-    .call()
-    .map_err(|e| e.to_string())?;
+    let mut response = ep
+        .get(&format!("/api/v1/report?month={month}&format={format}"))
+        .config()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .map_err(|e| e.to_string())?;
     let ok = response.status().is_success();
     let body = response
         .body_mut()

@@ -73,6 +73,23 @@ jobs:
         shell: pwsh
         run: ./installer/build.ps1
 
+  pi:
+    # The Raspberry Pi collector (ADR-0005): NUT only, no HID, so no hidapi or libudev. Built and
+    # tested natively on arm64. Ubuntu 22.04 keeps the glibc requirement (2.35) below Raspberry Pi
+    # OS Bookworm's (2.36), so the release binary runs there.
+    name: collector (Linux arm64, NUT only)
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo clippy -p ups-collector --no-default-features --all-targets --locked
+      - run: cargo test -p ups-collector -p ups-source --no-default-features --locked
+      - run: cargo build --release -p ups-collector --no-default-features --locked
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest

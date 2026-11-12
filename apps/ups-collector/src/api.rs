@@ -1,10 +1,11 @@
 //! The local HTTP + WebSocket API (see `ups-api` for the wire types).
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -37,6 +38,8 @@ pub struct AppState {
     pub ingest: std::sync::mpsc::Sender<crate::poller::PollerMsg>,
     /// The port the API listens on (for the `Host` check).
     pub port: u16,
+    /// Clients presenting this token may connect from anywhere (ADR-0005).
+    pub token: Option<crate::config::Secret>,
     /// Asks `main` to shut the collector down gracefully.
     pub shutdown: tokio::sync::mpsc::Sender<()>,
 }
@@ -47,7 +50,7 @@ pub struct AppState {
 const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub fn router(state: AppState) -> Router {
-    let guard = axum::middleware::from_fn_with_state(state.clone(), local_clients_only);
+    let guard = axum::middleware::from_fn_with_state(state.clone(), access_check);
     Router::new()
         .route(
             "/",
@@ -70,44 +73,87 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Every request must come from a local native client (review M1-2):
-/// * the `Host` must be a loopback name with our port. A web page using DNS
-///   rebinding reaches 127.0.0.1 under its own host name and is refused, so
-///   it can't read the status, history or reports;
-/// * no `Origin` header (browsers send it on cross-site requests; see
-///   [`reject_browsers`]).
-async fn local_clients_only(
+/// Who may use the API (review M1-2, ADR-0005). A request is allowed when it
+/// carries no `Origin` header (see [`reject_browsers`]) and either
+/// * comes from this computer with a loopback `Host` and our port. A web page
+///   using DNS rebinding reaches 127.0.0.1 under its own host name and is
+///   refused, so it can't read the status, history or reports; or
+/// * carries `Authorization: Bearer <token>` with the configured token
+///   (remote UIs, e.g. a desktop reading a Raspberry Pi collector).
+async fn access_check(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
-) -> Result<Response, ApiError> {
-    let host = request
-        .headers()
+) -> Response {
+    if let Err(e) = reject_browsers(request.headers()) {
+        return e.into_response();
+    }
+    let local = peer.ip().is_loopback() && loopback_host(request.headers(), state.port);
+    if !local && !has_token(request.headers(), state.token.as_ref()) {
+        return if state.token.is_some() {
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+                "a valid API token is required",
+            )
+                .into_response()
+        } else {
+            (StatusCode::FORBIDDEN, "unexpected Host header").into_response()
+        };
+    }
+    next.run(request).await
+}
+
+fn loopback_host(headers: &HeaderMap, port: u16) -> bool {
+    let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let allowed = ["127.0.0.1", "localhost", "[::1]"]
+    ["127.0.0.1", "localhost", "[::1]"]
         .iter()
-        .any(|name| host == format!("{name}:{}", state.port));
-    if !allowed {
-        return Err((StatusCode::FORBIDDEN, "unexpected Host header".into()));
-    }
-    reject_browsers(request.headers())?;
-    Ok(next.run(request).await)
+        .any(|name| host == format!("{name}:{port}"))
+}
+
+fn has_token(headers: &HeaderMap, token: Option<&crate::config::Secret>) -> bool {
+    let (Some(token), Some(given)) = (
+        token,
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer ")),
+    ) else {
+        return false;
+    };
+    constant_time_eq(given.trim().as_bytes(), token.expose().as_bytes())
+}
+
+/// Compares without an early exit, so response timing doesn't reveal how
+/// much of a guessed token was right.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// `POST /api/v1/shutdown` with `{}`: stops the collector gracefully (used by
 /// the installer before an upgrade; review M1-5).
+/// Only accepted from this computer: a remote UI can't stop a Pi's collector.
 async fn shutdown(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(_): Json<serde_json::Value>,
-) -> Json<SettingResponse> {
+) -> Result<Json<SettingResponse>, ApiError> {
+    if !peer.ip().is_loopback() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "the collector can only be stopped from its own computer".into(),
+        ));
+    }
     let _ = state.shutdown.try_send(());
-    Json(SettingResponse {
+    Ok(Json(SettingResponse {
         ok: true,
         message: "Collector stopping".into(),
-    })
+    }))
 }
 
 fn current(state: &AppState) -> StatusResponse {
@@ -490,4 +536,47 @@ async fn runtime_test(
     .await?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(Json(SettingResponse { ok: true, message }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checks_bearer_tokens() {
+        let token = crate::config::Secret::new("0123456789abcdef");
+        let mut h = HeaderMap::new();
+        assert!(!has_token(&h, Some(&token)));
+        h.insert(
+            header::AUTHORIZATION,
+            "Bearer 0123456789abcdef".parse().unwrap(),
+        );
+        assert!(has_token(&h, Some(&token)));
+        assert!(!has_token(&h, None), "no token configured: nothing matches");
+        h.insert(
+            header::AUTHORIZATION,
+            "Bearer 0123456789abcdeX".parse().unwrap(),
+        );
+        assert!(!has_token(&h, Some(&token)));
+        h.insert(
+            header::AUTHORIZATION,
+            "Basic 0123456789abcdef".parse().unwrap(),
+        );
+        assert!(!has_token(&h, Some(&token)));
+    }
+
+    #[test]
+    fn accepts_only_loopback_hosts_with_our_port() {
+        let mut h = HeaderMap::new();
+        for (host, ok) in [
+            ("127.0.0.1:47800", true),
+            ("LOCALHOST:47800", true),
+            ("[::1]:47800", true),
+            ("127.0.0.1:80", false),
+            ("evil.example:47800", false),
+        ] {
+            h.insert(header::HOST, host.parse().unwrap());
+            assert_eq!(loopback_host(&h, 47800), ok, "{host}");
+        }
+    }
 }

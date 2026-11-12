@@ -1,0 +1,36 @@
+# UPS-BMC collector configuration: remote notifications (ADR-0005).
+# Copy to /etc/ups-bmc/collector.toml (owner root, group ups-bmc, mode 0640: it holds secrets).
+# Configure any number of channels; delete or comment out the ones you don't use.
+# Check them with:  sudo -u ups-bmc ups-collector --config /etc/ups-bmc/collector.toml --test-notify
+
+[notify]
+# Events to send. Default (when left out): power_lost, power_restored, low_battery,
+# communication_lost, communication_restored, overload, replace_battery and the runtime test
+# prompts, the same as the desktop notifications. All kinds: collector_started,
+# collector_stopped, communication_lost, communication_restored, power_lost, power_restored,
+# low_battery, low_battery_cleared, replace_battery, overload, overload_cleared,
+# setting_changed, runtime_test, runtime_test_restore_power.
+# events = ["power_lost", "power_restored", "low_battery"]
+
+# ntfy (https://ntfy.sh or your own server). Anyone who knows a public topic name can read
+# it, so pick a long random one.
+# [notify.ntfy]
+# url = "https://ntfy.sh/ups-bmc-change-me-to-something-random"
+# token = "tk_..."            # only for protected topics
+
+# Telegram: create a bot with @BotFather, send it a message, then find your chat id at
+# https://api.telegram.org/bot<token>/getUpdates
+# [notify.telegram]
+# bot_token = "123456789:ABC..."
+# chat_id = 123456789          # or "@channelname"
+
+# Email over SMTP. security: "starttls" (default, port 587), "tls" (port 465) or "none"
+# (only for a relay on this machine). For Gmail, use an app password.
+# [notify.email]
+# smtp_host = "smtp.example.com"
+# smtp_port = 587
+# security = "starttls"
+# username = "ups@example.com"
+# password = "app-password"
+# from = "UPS-BMC <ups@example.com>"
+# to = ["you@example.com"]

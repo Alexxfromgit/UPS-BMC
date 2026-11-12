@@ -24,7 +24,8 @@ publish = false
 [workspace.dependencies]
 ups-model = { path = "crates/ups-model" }
 ups-hid = { path = "crates/ups-hid" }
-ups-source = { path = "crates/ups-source" }
+# Without the `hid` feature by default: apps opt in (the Raspberry Pi collector reads NUT only).
+ups-source = { path = "crates/ups-source", default-features = false }
 ups-store = { path = "crates/ups-store" }
 ups-api = { path = "crates/ups-api" }
 ups-analysis = { path = "crates/ups-analysis" }
@@ -38,8 +39,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tungstenite = "0.30"
-# Plain HTTP to the local collector only: no TLS stack.
+# The UI and tests talk plain HTTP to a collector. The collector enables `rustls` for its own
+# HTTPS notification channels (ntfy, Telegram).
 ureq = { version = "3", default-features = false, features = ["json"] }
+getrandom = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "rustls-tls"] }
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 bitflags = "2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
