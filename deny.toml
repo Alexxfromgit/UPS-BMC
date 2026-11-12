@@ -24,6 +24,10 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
+    # Collector notifications (ADR-0005): webpki-roots (Mozilla's CA list, used by
+    # rustls for HTTPS/SMTPS) and quoted_printable (lettre's email encoding).
+    "CDLA-Permissive-2.0",
+    "0BSD",
     # Slint (UI toolkit) is used under its Royalty-free Desktop License 2.0,
     # which requires visible attribution: the AboutSlint badge in the About
     # dialog (apps/ups-bmc/ui/app.slint). Its GPL-3.0 alternative is not used.

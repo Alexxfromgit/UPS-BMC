@@ -11,7 +11,7 @@ publish.workspace = true
 
 [dependencies]
 ups-hid.workspace = true
-ups-source.workspace = true
+ups-source = { workspace = true, features = ["hid"] }
 
 anyhow.workspace = true
 chrono.workspace = true

@@ -144,9 +144,48 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-pi:
+    # Collector for a Raspberry Pi (64-bit Raspberry Pi OS) reading NUT; see docs/raspberry-pi.md.
+    # Ubuntu 22.04 keeps the glibc requirement below Raspberry Pi OS Bookworm's.
+    name: build (Raspberry Pi collector, Linux arm64)
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Test
+        run: cargo test -p ups-collector -p ups-source --no-default-features --locked
+      - name: Build
+        run: cargo build --release -p ups-collector --no-default-features --locked
+      - name: Stage release files
+        run: |
+          set -euo pipefail
+          name="UPS-BMC-$VERSION-linux-arm64-collector"
+          mkdir -p "artifacts/$name" artifacts/stage
+          cp target/release/ups-collector deploy/raspberry-pi/* docs/raspberry-pi.md README.md LICENSE "artifacts/$name/"
+          tar -C artifacts -czf "artifacts/stage/$name.tar.gz" "$name"
+          ls -l artifacts/stage
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-linux-arm64
+          path: artifacts/stage
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
-    needs: [prepare, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    needs: [prepare, build, build-pi]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.build-pi.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

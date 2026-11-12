@@ -198,17 +198,6 @@ fn switches_the_beeper_and_refuses_browsers() {
     assert_eq!(code, 422);
 }
 
-#[test]
-fn refuses_non_loopback_bind() {
-    let out = Command::new(env!("CARGO_BIN_EXE_ups-collector"))
-        .args(["--source", "sim", "--bind", "0.0.0.0:47999"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("only loopback"), "{stderr}");
-}
-
 fn text(c: &Collector, path: &str) -> (u16, String) {
     let mut resp = ureq::get(format!("http://{}{path}", c.base))
         .config()
@@ -417,4 +406,74 @@ fn survives_a_restart_mid_outage() {
             .any(|e| e.kind == EventKind::CollectorStopped),
         "graceful stop recorded"
     );
+}
+
+#[test]
+fn accepts_a_valid_token_from_any_host_name() {
+    // A remote UI addresses the collector by its LAN name and sends the token.
+    let port = free_port();
+    let dir = std::env::temp_dir().join(format!("ups-collector-e2e-{}-{port}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let token_file = dir.join("token");
+    std::fs::write(&token_file, "0123456789abcdef0123456789abcdef\n").unwrap();
+    let c = start_in(dir, port, &["--token-file", token_file.to_str().unwrap()]);
+    wait_for(Duration::from_secs(20), || {
+        get::<StatusResponse>(&c, "/api/v1/status").filter(|s| s.snapshot.is_some())
+    });
+    let status = |auth: Option<&str>| {
+        let mut request = ureq::get(format!("http://{}/api/v1/status", c.base))
+            .header("Host", format!("ups-pi.lan:{port}"));
+        if let Some(a) = auth {
+            request = request.header("Authorization", a);
+        }
+        request
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .call()
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    assert_eq!(status(None), 401);
+    assert_eq!(status(Some("Bearer wrong-token-wrong-token")), 401);
+    assert_eq!(status(Some("Bearer 0123456789abcdef0123456789abcdef")), 200);
+
+    // The live stream needs the token too.
+    let mut request = tungstenite::client::IntoClientRequest::into_client_request(format!(
+        "ws://{}/api/v1/live",
+        c.base
+    ))
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("Host", format!("ups-pi.lan:{port}").parse().unwrap());
+    assert!(tungstenite::connect(request.clone()).is_err());
+    request.headers_mut().insert(
+        "Authorization",
+        "Bearer 0123456789abcdef0123456789abcdef".parse().unwrap(),
+    );
+    let (mut ws, _) = tungstenite::connect(request).unwrap();
+    let first = ws.read().unwrap();
+    assert!(first.to_text().unwrap().contains(r#""type":"status""#));
+}
+
+#[test]
+fn refuses_to_serve_the_lan_without_a_token() {
+    let dir = std::env::temp_dir().join(format!("ups-collector-e2e-{}-lan", std::process::id()));
+    let out = Command::new(env!("CARGO_BIN_EXE_ups-collector"))
+        .args(["--source", "sim", "--bind", "0.0.0.0:0", "--db"])
+        .arg(dir.join("test.sqlite"))
+        .arg("--log-dir")
+        .arg(dir.join("logs"))
+        .env_remove(ups_api::TOKEN_ENV)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("without an API token"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.exists(), "nothing was created");
 }

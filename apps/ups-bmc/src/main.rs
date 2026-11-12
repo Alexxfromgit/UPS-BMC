@@ -11,6 +11,7 @@ mod autostart;
 mod client;
 mod health_view;
 mod launch;
+mod ui_config;
 mod view;
 
 use std::cell::RefCell;
@@ -19,9 +20,9 @@ use std::rc::Rc;
 use anyhow::Result;
 use clap::Parser;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, StandardListViewItem, VecModel};
-use ups_api::{DEFAULT_PORT, Event, EventKind, HealthReport, RuntimeTestRequest};
+use ups_api::{Event, HealthReport, RuntimeTestRequest};
 
-use crate::client::{ClientConfig, Update};
+use crate::client::{ClientConfig, Endpoint, Update};
 use crate::view::{EventLine, OutagesView, View};
 
 /// Code generated from `ui/app.slint`.
@@ -40,9 +41,14 @@ use ui::{AppWindow, EventRow, StatCardData, Tray};
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
-    /// Collector address.
-    #[arg(long, default_value_t = format!("127.0.0.1:{DEFAULT_PORT}"))]
-    collector: String,
+    /// Collector address, `host:port` (default: `collector` in ui.toml, else
+    /// 127.0.0.1:47800). A collector on another computer needs its API token.
+    #[arg(long)]
+    collector: Option<String>,
+    /// File holding the collector's API token (default: the `UPS_BMC_TOKEN`
+    /// environment variable, else `token` in ui.toml).
+    #[arg(long)]
+    token_file: Option<std::path::PathBuf>,
     /// Don't start the collector automatically.
     #[arg(long)]
     no_auto_start: bool,
@@ -188,8 +194,8 @@ fn table(rows: &[Vec<String>]) -> ModelRc<ModelRc<StandardListViewItem>> {
 /// then refreshes the Battery health tab.
 fn request_then_refresh(
     w: slint::Weak<AppWindow>,
-    address: String,
-    request: impl FnOnce(&str) -> Result<String, String> + Send + 'static,
+    address: Endpoint,
+    request: impl FnOnce(&Endpoint) -> Result<String, String> + Send + 'static,
     show: fn(&AppWindow, SharedString),
 ) {
     std::thread::spawn(move || {
@@ -206,10 +212,10 @@ fn request_then_refresh(
 }
 
 /// Battery health tab: installation date and the guided runtime test.
-fn wire_health(window: &AppWindow, collector: &str) {
+fn wire_health(window: &AppWindow, collector: &Endpoint) {
     window.set_test_stop_index(health_view::DEFAULT_STOP_INDEX);
 
-    let (w, address) = (window.as_weak(), collector.to_owned());
+    let (w, address) = (window.as_weak(), collector.clone());
     window.on_set_battery_installed(move |text| {
         let text = text.trim();
         let date = if text.is_empty() {
@@ -233,7 +239,7 @@ fn wire_health(window: &AppWindow, collector: &str) {
         );
     });
 
-    let (w, address) = (window.as_weak(), collector.to_owned());
+    let (w, address) = (window.as_weak(), collector.clone());
     window.on_battery_replaced_today(move || {
         // The collector records the exact time, so outages earlier today (on
         // the old battery) don't count for the new one (review M3-8).
@@ -245,7 +251,7 @@ fn wire_health(window: &AppWindow, collector: &str) {
         );
     });
 
-    let (w, address) = (window.as_weak(), collector.to_owned());
+    let (w, address) = (window.as_weak(), collector.clone());
     window.on_start_runtime_test(move |index| {
         let Some(&stop_at_pct) = usize::try_from(index)
             .ok()
@@ -261,7 +267,7 @@ fn wire_health(window: &AppWindow, collector: &str) {
         );
     });
 
-    let (w, address) = (window.as_weak(), collector.to_owned());
+    let (w, address) = (window.as_weak(), collector.clone());
     window.on_cancel_runtime_test(move || {
         request_then_refresh(
             w.clone(),
@@ -339,9 +345,9 @@ fn open_path(path: &std::path::Path, reveal: bool) -> std::io::Result<()> {
 }
 
 /// Reports tab: download the selected month's report and open it.
-fn wire_reports(window: &AppWindow, collector: &str) {
+fn wire_reports(window: &AppWindow, collector: &Endpoint) {
     let w = window.as_weak();
-    let address = collector.to_owned();
+    let address = collector.clone();
     window.on_open_report(move |index, csv| {
         let Some(win) = w.upgrade() else { return };
         let Some(month) = usize::try_from(index)
@@ -369,7 +375,7 @@ fn wire_reports(window: &AppWindow, collector: &str) {
     });
 }
 
-fn save_report(address: &str, month: &str, csv: bool) -> Result<std::path::PathBuf, String> {
+fn save_report(address: &Endpoint, month: &str, csv: bool) -> Result<std::path::PathBuf, String> {
     let body = client::fetch_report(address, month, csv)?;
     let (year, mon) =
         ups_analysis::stats::parse_month(month).ok_or_else(|| format!("bad month {month}"))?;
@@ -402,19 +408,8 @@ fn installed_shortcut_exists() -> bool {
 
 /// Desktop notification for the events that matter to a person.
 fn notify(event: &Event) {
-    let title = match event.kind {
-        EventKind::PowerLost => "Power outage",
-        EventKind::PowerRestored => "Power restored",
-        EventKind::LowBattery => "UPS battery low!",
-        EventKind::CommunicationLost => "UPS connection lost",
-        EventKind::CommunicationRestored => "UPS connection restored",
-        EventKind::Overload => "UPS overloaded",
-        EventKind::ReplaceBattery => "Replace the UPS battery",
-        EventKind::RuntimeTestRestorePower => "Runtime test: plug the UPS back in",
-        EventKind::RuntimeTest if event.message.starts_with("Runtime test finished") => {
-            "Runtime test finished"
-        }
-        _ => return,
+    let Some(title) = ups_api::notification_title(event) else {
+        return;
     };
     let mut n = notify_rust::Notification::new();
     n.appname("UPS-BMC").summary(title).body(&event.message);
@@ -429,7 +424,7 @@ fn notify(event: &Event) {
 }
 
 /// Settings dialog: beeper (through the collector, ADR-0003) and autostart.
-fn wire_settings(window: &AppWindow, collector: &str) {
+fn wire_settings(window: &AppWindow, collector: &Endpoint) {
     window.set_autostart_available(autostart::supported());
     window.set_autostart_on(autostart::is_enabled());
 
@@ -446,7 +441,7 @@ fn wire_settings(window: &AppWindow, collector: &str) {
     });
 
     let w = window.as_weak();
-    let address = collector.to_owned();
+    let address = collector.clone();
     window.on_set_assumed_load(move |text| {
         let text = text.trim().replace(',', ".");
         let watts = if text.is_empty() {
@@ -482,7 +477,7 @@ fn wire_settings(window: &AppWindow, collector: &str) {
     });
 
     let w = window.as_weak();
-    let address = collector.to_owned();
+    let address = collector.clone();
     window.on_set_beeper(move |enabled| {
         if let Some(win) = w.upgrade() {
             win.set_beeper_busy(true);
@@ -521,15 +516,17 @@ fn main() -> Result<()> {
 
     let window = AppWindow::new()?;
     let tray = Tray::new()?;
+    let (endpoint, config_error) =
+        ui_config::endpoint(args.collector.clone(), args.token_file.as_deref());
     apply_view(
         &window,
         &tray,
-        &view::collector_offline("Connecting…", false),
+        &view::collector_offline(config_error.as_deref().unwrap_or("Connecting…"), false),
     );
     wire_tray(&window, &tray);
-    wire_settings(&window, &args.collector);
-    wire_reports(&window, &args.collector);
-    wire_health(&window, &args.collector);
+    wire_settings(&window, &endpoint);
+    wire_reports(&window, &endpoint);
+    wire_health(&window, &endpoint);
 
     let collector_args: Vec<String> = if args.sim {
         vec!["--source".into(), "sim".into()]
@@ -555,8 +552,8 @@ fn main() -> Result<()> {
     let t = tray.as_weak();
     client::spawn(
         ClientConfig {
-            address: args.collector.clone(),
-            auto_start: !args.no_auto_start,
+            auto_start: !args.no_auto_start && endpoint.is_local(),
+            endpoint,
             collector_args,
         },
         move |update| {
