@@ -39,6 +39,7 @@ jobs:
     outputs:
       created: ${{ steps.rp.outputs.release_created }}
       tag: ${{ steps.rp.outputs.tag_name }}
+      prs_created: ${{ steps.rp.outputs.prs_created }}
     steps:
       - id: rp
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
@@ -48,6 +49,32 @@ jobs:
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # Release Please bumps the version in Cargo.toml but not in Cargo.lock, and every build uses
+  # --locked. Bring the lock file in line on the release branch after each update of the PR.
+  sync-lockfile:
+    needs: release-please
+    if: needs.release-please.outputs.prs_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release-please--branches--main
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Update the workspace versions in Cargo.lock
+        run: |
+          cargo update --workspace
+          if git diff --quiet -- Cargo.lock; then echo "Cargo.lock already up to date"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: update Cargo.lock for the release"
+          git push
 
   prepare:
     needs: release-please
